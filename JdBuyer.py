@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import time
 import sys
+import os
 
 from config import global_config
 from log import logger
@@ -27,6 +28,25 @@ class Buyer(object):
         self.scKey = global_config.get('messenger', 'sckey')
 
     ############## 登录相关 #############
+    # 检查登录状态
+    def checkLoginStatus(self):
+        """检查当前登录状态并测试cookies有效性
+        :return: 登录状态是否有效 True/False
+        """
+        if not self.session.isLogin:
+            logger.info("当前未登录状态")
+            return False
+            
+        # 验证登录状态和cookies
+        logger.info("正在检查登录状态...")
+        if self.session.validateCookies():
+            logger.info("登录状态检查通过，cookies有效")
+            return True
+        else:
+            logger.warning("登录状态检查未通过，需要重新登录")
+            self.session.isLogin = False
+            return False
+    
     # 短信登录
     def loginBySMS(self, phone=None):
         """
@@ -75,19 +95,30 @@ class Buyer(object):
         使用二维码登录京东
         :return: 登录是否成功 True/False
         """
-        # 二维码登录流程
-        # download QR code
+        logger.info('开始二维码登录流程...')
+        
+        # 下载二维码
         qrCode = self.session.getQRcode()
         if not qrCode:
             logger.error('二维码下载失败')
             return False
 
+        # 保存二维码图片
         fileName = 'QRcode.png'
-        save_image(qrCode, fileName)
-        logger.info('二维码获取成功，请打开京东APP扫描')
-        open_image(fileName)
-
-        # get QR code ticket
+        if not save_image(qrCode, fileName):
+            logger.error('二维码保存失败')
+            return False
+            
+        # 提示用户扫描
+        logger.info(f'二维码已保存到: {fileName}')
+        
+        # 尝试自动打开图片
+        if open_image(fileName):
+            logger.info('已自动打开二维码图片，请用京东APP扫描')
+        else:
+            logger.warning(f'无法自动打开二维码，请手动打开文件并使用京东APP扫描: {os.path.abspath(fileName)}')
+        
+        # 获取二维码票据
         ticket = None
         retryTimes = 60
         status_code = 0
@@ -120,18 +151,26 @@ class Buyer(object):
                 logger.error(f'获取二维码票据失败: {status_msg}')
             return False
 
-        # validate QR code ticket
+        # 验证二维码票据
         if not self.session.validateQRcodeTicket(ticket):
-            logger.error('二维码信息校验失败')
+            logger.error('二维码验证失败，登录未成功')
             return False
 
-        logger.info('二维码登录成功')
+        logger.info('二维码验证成功，登录完成')
         self.session.isLogin = True
         self.session.saveCookies()
+        # 加载已保存的cookies
+        self.session.updateCookies()
+        logger.info('已加载保存的cookies')
+             
+        # 登录成功后验证cookies是否可用
+        if not self.checkLoginStatus():
+            logger.warning("二维码验证成功但Cookie验证失败，可能影响后续操作")
+
         return True
         
     # 统一登录入口
-    def login(self, login_type='qrcode', phone=None):
+    def login(self, login_type='qrcode'):
         """
         登录京东
         :param login_type: 登录方式，'sms'短信登录，'qrcode'二维码登录(默认)
@@ -140,13 +179,13 @@ class Buyer(object):
         """
         # 先检查当前登录状态
         if self.session.isLogin:
-            logger.info('已处于登录状态')
+            logger.info('已处于登录状态，无需重新登录')
             return True
             
         # 根据登录类型选择登录方式
         if login_type == 'sms':
             logger.info('使用短信验证码登录')
-            return self.loginBySMS(phone)
+            return self.loginBySMS()
         else:
             logger.info('使用二维码登录')
             return self.loginByQrCode()
@@ -237,6 +276,7 @@ if __name__ == '__main__':
     # 商品sku
     # skuId = '10118287699614'
     skuId = '10137555659077'
+    # skuId = '10098249630626'
     # skuId = '100015253059'
     # 区域id(可根据工程 area_id 目录查找)
     # areaId = '18_1482_48942_49129'

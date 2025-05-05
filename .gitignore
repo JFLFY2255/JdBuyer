@@ -25,12 +25,21 @@ ENV/
 
 # 项目特定文件
 cookies/
+debug_html/
 QRcode.png
+
+# 日志文件
+logs/
 *.log
 
 # 配置文件（如果不想将配置加入版本控制）
-# config.ini
-# config.json
+config.ini
+config.json
+
+# 测试和临时文件
+temp/
+.pytest_cache/
+.coverage
 
 # 系统文件
 .DS_Store

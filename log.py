@@ -19,7 +19,7 @@ def set_logger():
         os.makedirs(log_dir)
     # 定义handler的输出格式
     formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        "%(asctime)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s")
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     

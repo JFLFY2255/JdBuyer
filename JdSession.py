@@ -12,7 +12,8 @@ from lxml import etree
 from log import logger
 
 DEFAULT_TIMEOUT = 10
-DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36'
+# DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36'
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
 
 if getattr(sys, 'frozen', False):
     absPath = os.path.dirname(os.path.abspath(sys.executable))
@@ -41,17 +42,53 @@ class Session(object):
         self.lsid = None
         self.phone = None
         
-        try:
-            logger.info("初始化时尝试加载cookies...")
-            self.loadCookies()
-        except Exception as e:
-            logger.error(f"初始化加载cookies失败: {e}")
-            pass
-        
         # 创建调试目录
         self.debug_dir = os.path.join(absPath, 'debug_html')
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
+            
+        # 尝试加载cookies
+        logger.info("初始化时尝试加载cookies...")
+        cookies_loaded = False
+        try:
+            # 先尝试从配置文件加载cookie字符串
+            try:
+                from config import global_config
+                cookie_str = global_config.get('account', 'cookie', raw=True)
+                if cookie_str and len(cookie_str) > 10:
+                    logger.info('尝试从配置文件加载Cookie...')
+                    cookies_loaded, error_msg = self.updateCookies(cookie_str)
+                    if cookies_loaded:
+                        logger.info("配置文件中的cookie加载成功")
+                    else:
+                        logger.warning(f"配置文件中的cookie加载失败: {error_msg}")
+            except Exception as e:
+                logger.warning(f"从配置文件加载Cookie出错: {e}")
+                
+            # 如果配置文件加载失败，尝试从文件加载cookies
+            if not cookies_loaded:
+                logger.info("尝试从文件加载cookies...")
+                cookies_loaded, error_msg = self.updateCookies()
+                if cookies_loaded:
+                    logger.info("文件中的cookies加载成功")
+                else:
+                    logger.info(f"文件中的cookies加载失败: {error_msg}")
+                    
+            # 无论从哪里加载的cookie，统一进行验证
+            if cookies_loaded:
+                if self.validateCookies():
+                    logger.info("Cookie验证成功，已处于登录状态")
+                    self.isLogin = True
+                    # 如果是从配置文件加载的cookie，保存到文件以便下次使用
+                    self.saveCookies()
+                else:
+                    logger.warning("Cookie已过期或无效，请手动删除")
+                    self.isLogin = False
+        except Exception as e:
+            logger.error(f"初始化加载cookies失败: {e}")
+        
+        if not self.isLogin:
+            logger.info("未能成功加载有效cookies，需要重新登录")
 
     # 保存HTML内容到文件
     def saveHtml(self, html_content, filename_prefix):
@@ -83,40 +120,65 @@ class Session(object):
         logger.info("已保存Cookie到文件")
 
     # 加载 cookie
-    def loadCookies(self):
+    def _loadCookies(self, cookiesFile=None):
         """加载Cookie并验证是否有效
+        :param cookiesFile: 指定cookie文件路径，为空则使用默认路径
         :return: 是否成功加载并验证Cookie True/False
         """
         try:
-            cookiesFile = os.path.join(
-                absPath, './cookies/{0}.cookies'.format(self.username))
+            # 如果没有指定cookie文件路径，则使用默认路径
+            if not cookiesFile:
+                cookiesFile = os.path.join(
+                    absPath, './cookies/{0}.cookies'.format(self.username))
             
             # 检查Cookie文件是否存在
             if not os.path.exists(cookiesFile):
-                logger.error(f"Cookie文件不存在: {cookiesFile}")
-                return False
+                return False, "Cookie文件不存在"
+                
+            # 检查文件大小
+            if os.path.getsize(cookiesFile) == 0:
+                return False, "Cookie文件为空"
                 
             # 加载Cookie文件
-            logger.info(f"正在加载Cookie文件: {cookiesFile}")
-            with open(cookiesFile, 'rb') as f:
-                local_cookies = pickle.load(f)
-            self.sess.cookies.update(local_cookies)
+            try:
+                with open(cookiesFile, 'rb') as f:
+                    local_cookies = pickle.load(f)
+                self.sess.cookies.update(local_cookies)
+            except (pickle.UnpicklingError, EOFError) as e:
+                return False, f"Cookie文件格式错误: {e}"
             
-            # 验证Cookie是否有效
-            self.isLogin = self._validateCookies()
-            
-            if self.isLogin:
-                logger.info(f"Cookie验证成功，已登录状态")
-                return True
-            else:
-                logger.info(f"Cookie已过期，需要重新登录")
-                return False
+            # 不再这里验证Cookie有效性，由调用者决定何时验证
+            return True, None
         except Exception as e:
-            logger.error(f"加载Cookie时出错: {e}")
-            return False
+            return False, f"加载Cookie时出错: {e}"
+    
+    def updateCookies(self, cookie_str = None):
+        """更新Cookies，可以从文件或字符串更新
+        :param cookie_str: Cookie字符串，为None时从文件加载
+        :return: (是否成功加载 True/False, 错误信息)
+        """
+        if cookie_str is None:
+            # 从文件加载
+            result, error_msg = self._loadCookies()
+            return result, error_msg
+        else:
+            # 从字符串加载
+            if len(cookie_str) < 10:
+                return False, '配置文件中Cookie为空或过短，更新失败'
+            
+            # 将cookie字符串转换为字典
+            cookie_dict = {}
+            for item in cookie_str.split(';'):
+                if '=' in item:
+                    name, value = item.strip().split('=', 1)
+                    cookie_dict[name] = value
+            
+            # 更新session的cookies
+            self.sess.cookies.update(cookie_dict)
+            return True, None
 
     # 验证 cookie
-    def _validateCookies(self):
+    def validateCookies(self):
         """
         通过访问用户订单列表页进行判断：若未登录，将会重定向到登陆页面。
         :return: cookies是否有效 True/False
@@ -125,18 +187,31 @@ class Session(object):
         payload = {
             'rid': str(int(time.time() * 1000)),
         }
+        headers = {
+            'User-Agent': self.userAgent,
+            'cookie': 'shshshfpa=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; shshshfpx=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; __jdv=94967808|www.popmart.com.cn|-|referral|-|1746123672002; __jdu=17461236720021421729451; user-key=4d8730bf-8f59-468e-8914-886a49fb743a; PCSYCityID=CN_110000_110100_0; areaId=18; ipLoc-djd=1-2901-55565-0.9504675402; ipLocation=%u5317%u4eac; umc_count=1; jsavif=1; jsavif=1; o2State=; TrackID=13VktL_GIhCvEeKRSK9MSW6aYHoMDx-pEnzcb6gkhk_4c_yoboAxyNZQDXzNETegqQce9lWRPMtNxFkKYfpBlTtG8Qu9w1o67eUw2M3RacT1DrRkQu_VMy51i9FGQpbZ-; thor=442A1477C204DB7E5DA32115556DA7388E98EBF52DE77AAE1DD0FB55873F6B5915D98B6A12BC1ABA65C034DEC0CF31550250B09F7689D91504AB506A1D0696EEF00594E44C899792EA8549CD04E7ED0C45537F4F880CA28DA34EA53394D727E06DCB9FAFBF870DC06AC644B9B814ECAEC33C47EE4312926FB6DED7417140A9F1FEDEE347BC5B2B997184198E77B76786; light_key=AASBKE7rOxgWQziEhC_QY6ya-ON8QiPjWlvS75DDHhhNctqzLSInsNA2muIOFuqu5286Tw4G; pinId=mceLUjN9-aN4LF7FK8COGg; pin=JFLFY2255; unick=n1c2yrutn99v5l; ceshi3.com=000; _tp=NObGvZOrUmvIDNZgnBTkJA%3D%3D; _pst=JFLFY2255; cn=27; 3AB9D23F7A4B3C9B=BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7Q; flash=3_MftHLZPBhgtC8y3uEN1mJJUJ9kmLPCGIdb4UMO5VlMrCnJ9iKEEqUWo33Ce3EugYEY49zFEBXKhRWGpnZfiy_2kV_pOsXA7puAOR6cJRoTdvSlZnLbRkfaJVmMYBgLU4ccp3pkrHXWQiSwu5JKoiMPaMWyPd7cMPCwkQmxwDqsbF; 3AB9D23F7A4B3CSS=jdd03BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7QAAAAMWT5NJK6AAAAAADM66W7ZBUDISOIX; _gia_d=1; token=2225647c427355c3439744597229896c,3,970239; __jda=181111935.17461236720021421729451.1746123672.1746412013.1746423518.7; __jdc=181111935; mt_xid=V2_52007VwMUV1pYUVgYTxpdBGQDF1FdXlFSGk0ZbARlAxQCXAsGRhcZTF4ZYlZGUEEIV18eVUlaA25XQAYICFFTHHkaXQZjHxNWQVlWSx9NEl4FbAIRYl9oUmoWQRlaBGcHFldaXFdTG0EeXQJnMxdTVF4%3D; shshshfpb=BApXSFJJTnPNAwkUa1SReRwfYm7fSlMbyBgRTMV9p9xJ1MiSADo62; __jdb=181111935.56.17461236720021421729451|7.1746423518; sdtoken=AAbEsBpEIOVjqTAKCQtvQu17_YJ0StieaDcBLBamrqqvx9ozkWiCevaEIqlKNTBHLqW7g3_6u796RhhDu-rvxbkBeVSbYFWzW_4MTCr84fokZkmRCKZWYxVkXA7YfV8RuQTuERp-whlit7f3KU91tG7hIIyS74bfmA',
+        }
         try:
             logger.info("正在验证Cookie有效性...")
-            resp = self.sess.get(url=url, params=payload,
-                               allow_redirects=False)
+            resp = self.sess.get(url=url, params=payload, headers=headers, allow_redirects=False)
             
             if resp.status_code == 200:
-                logger.info(f"Cookie有效，成功访问订单页面")
+                logger.info(f"Cookie有效，成功访问订单页面: {resp.url}")
                 return True
             else:
                 logger.info(f"Cookie无效，状态码: {resp.status_code}, 可能需要重新登录")
                 if resp.status_code == 302:
                     logger.info(f"被重定向到: {resp.headers.get('Location', '未知页面')}")
+                    
+                    # 添加额外的尝试，访问京东首页检查登录状态
+                    try:
+                        logger.info("尝试访问京东首页检查登录状态...")
+                        home_resp = self.sess.get('https://www.jd.com/')
+                        if 'nickname' in home_resp.text:
+                            logger.info("首页访问成功且包含用户信息")
+                            return True
+                    except Exception as e:
+                        logger.error(f"访问首页时出错: {e}")
         except Exception as e:
             logger.error(f"验证Cookie时发生错误: {e}")
             return False
@@ -432,8 +507,8 @@ class Session(object):
             except:
                 pass
                 
-            # 也可能是302重定向，或者其他格式的响应，检查Cookie是否有效
-            if self._validateCookies():
+            # 检查响应内容中是否包含成功标识
+            if "success" in resp.text.lower() or "成功" in resp.text:
                 logger.info("短信验证码登录成功")
                 self.isLogin = True
                 self.saveCookies()
@@ -454,26 +529,51 @@ class Session(object):
         # 直接访问商品页面获取信息
         url = 'https://item.jd.com/{}.html'.format(skuId)
         logger.info(f"正在获取商品信息: {url}")
+        
+        # 使用提供的完整请求头信息
         headers = {
             'User-Agent': self.userAgent,
+            'cookie': 'shshshfpa=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; shshshfpx=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; __jdv=94967808|www.popmart.com.cn|-|referral|-|1746123672002; __jdu=17461236720021421729451; user-key=4d8730bf-8f59-468e-8914-886a49fb743a; PCSYCityID=CN_110000_110100_0; areaId=18; ipLoc-djd=1-2901-55565-0.9504675402; ipLocation=%u5317%u4eac; umc_count=1; jsavif=1; jsavif=1; o2State=; TrackID=13VktL_GIhCvEeKRSK9MSW6aYHoMDx-pEnzcb6gkhk_4c_yoboAxyNZQDXzNETegqQce9lWRPMtNxFkKYfpBlTtG8Qu9w1o67eUw2M3RacT1DrRkQu_VMy51i9FGQpbZ-; thor=442A1477C204DB7E5DA32115556DA7388E98EBF52DE77AAE1DD0FB55873F6B5915D98B6A12BC1ABA65C034DEC0CF31550250B09F7689D91504AB506A1D0696EEF00594E44C899792EA8549CD04E7ED0C45537F4F880CA28DA34EA53394D727E06DCB9FAFBF870DC06AC644B9B814ECAEC33C47EE4312926FB6DED7417140A9F1FEDEE347BC5B2B997184198E77B76786; light_key=AASBKE7rOxgWQziEhC_QY6ya-ON8QiPjWlvS75DDHhhNctqzLSInsNA2muIOFuqu5286Tw4G; pinId=mceLUjN9-aN4LF7FK8COGg; pin=JFLFY2255; unick=n1c2yrutn99v5l; ceshi3.com=000; _tp=NObGvZOrUmvIDNZgnBTkJA%3D%3D; _pst=JFLFY2255; cn=27; 3AB9D23F7A4B3C9B=BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7Q; flash=3_MftHLZPBhgtC8y3uEN1mJJUJ9kmLPCGIdb4UMO5VlMrCnJ9iKEEqUWo33Ce3EugYEY49zFEBXKhRWGpnZfiy_2kV_pOsXA7puAOR6cJRoTdvSlZnLbRkfaJVmMYBgLU4ccp3pkrHXWQiSwu5JKoiMPaMWyPd7cMPCwkQmxwDqsbF; 3AB9D23F7A4B3CSS=jdd03BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7QAAAAMWT5NJK6AAAAAADM66W7ZBUDISOIX; _gia_d=1; token=2225647c427355c3439744597229896c,3,970239; __jda=181111935.17461236720021421729451.1746123672.1746412013.1746423518.7; __jdc=181111935; mt_xid=V2_52007VwMUV1pYUVgYTxpdBGQDF1FdXlFSGk0ZbARlAxQCXAsGRhcZTF4ZYlZGUEEIV18eVUlaA25XQAYICFFTHHkaXQZjHxNWQVlWSx9NEl4FbAIRYl9oUmoWQRlaBGcHFldaXFdTG0EeXQJnMxdTVF4%3D; shshshfpb=BApXSFJJTnPNAwkUa1SReRwfYm7fSlMbyBgRTMV9p9xJ1MiSADo62; __jdb=181111935.56.17461236720021421729451|7.1746423518; sdtoken=AAbEsBpEIOVjqTAKCQtvQu17_YJ0StieaDcBLBamrqqvx9ozkWiCevaEIqlKNTBHLqW7g3_6u796RhhDu-rvxbkBeVSbYFWzW_4MTCr84fokZkmRCKZWYxVkXA7YfV8RuQTuERp-whlit7f3KU91tG7hIIyS74bfmA',
         }
+
+        logger.info(f"使用 User-Agent: {headers.get('user-agent', self.userAgent)}") # 获取实际使用的UA
+
         try:
-            resp = self.sess.get(url=url, headers=headers)
+            logger.info(f"开始请求商品页面: {url}")
+            resp = self.sess.get(url=url, headers=headers, timeout=self.timeout)
+
+            # 记录响应状态
+            logger.info(f"商品页面响应状态码: {resp.status_code}")
+
+            # 检查是否发生了重定向
+            if url != resp.url:
+                logger.warning(f"请求被重定向: {url} -> {resp.url}")
+            
             if not self.respStatus(resp):
+                logger.error(f"获取商品页面失败: HTTP状态码 {resp.status_code}")
                 detail = dict(venderId='0')
                 self.itemDetails[skuId] = detail
                 return
-            
+
             # 保存HTML内容用于调试
-            self.saveHtml(resp.text, f"item_detail_{skuId}")
-                
+            debug_file = self.saveHtml(resp.text, f"item_detail_{skuId}")
+
+            # 检查响应内容
+            if len(resp.text) < 1000:
+                logger.warning(f"商品页面内容过短，可能被重定向或限制: {len(resp.text)} 字符")
+                if "location.href" in resp.text:
+                    logger.warning("检测到页面包含重定向脚本")
+
             html = etree.HTML(resp.text)
-            
+
             # 提取店铺ID
             shop_id = '0'
             shop_info = html.xpath('//div[contains(@class, "shopName")]/div[@class="name"]/a/@data-shopid')
             if shop_info:
                 shop_id = shop_info[0]
+                logger.info(f"成功提取到店铺ID: {shop_id}")
+            else:
+                logger.warning("未能提取到店铺ID，使用默认值'0'")
                 
             detail = dict(venderId=shop_id)
             
@@ -481,6 +581,7 @@ class Session(object):
             yushou_info = html.xpath('//div[contains(@class, "summary-price-wrap")]//span[contains(text(), "预售")]/text()')
             if yushou_info:
                 detail['yushouUrl'] = url
+                logger.info("检测到预售商品")
                 
             # 检查是否是秒杀商品
             miaosha_info = html.xpath('//div[contains(@class, "summary-price-wrap")]//span[contains(text(), "秒杀")]/text()')
@@ -488,8 +589,11 @@ class Session(object):
                 # 获取秒杀时间，实际时间需要从页面上解析，这里只是占位
                 detail['startTime'] = int(time.time()) * 1000
                 detail['endTime'] = int(time.time() + 3600) * 1000  # 默认一小时
+                logger.info("检测到秒杀商品")
                 
+            logger.info(f"商品信息获取完成: {detail}")
             self.itemDetails[skuId] = detail
+            
         except Exception as e:
             # 出错时设置默认值
             detail = dict(venderId='0')

@@ -120,21 +120,33 @@ def response_status(resp):
 
 
 def open_image(image_file):
-    if os.name == "nt":
-        os.system('start ' + image_file)  # for Windows
-    else:
-        if os.uname()[0] == "Linux":
-            if "deepin" in os.uname()[2]:
-                os.system("deepin-image-viewer " + image_file)  # for deepin
-            else:
-                os.system("eog " + image_file)  # for Linux
+    try:
+        if os.name == "nt":
+            os.system('start ' + image_file)  # for Windows
         else:
-            os.system("open " + image_file)  # for Mac
+            if os.uname()[0] == "Linux":
+                if "deepin" in os.uname()[2]:
+                    os.system("deepin-image-viewer " + image_file)  # for deepin
+                else:
+                    os.system("eog " + image_file)  # for Linux
+            else:
+                os.system("open " + image_file)  # for Mac
+        logger.info(f"已打开图片: {image_file}")
+        return True
+    except Exception as e:
+        logger.error(f"打开图片失败: {e}")
+        return False
 
 
 def save_image(resp, image_file):
-    with open(image_file, 'wb') as f:
-        f.write(resp)
+    try:
+        with open(image_file, 'wb') as f:
+            f.write(resp)
+        logger.info(f"二维码已保存到文件: {image_file}")
+        return True
+    except Exception as e:
+        logger.error(f"保存图片失败: {e}")
+        return False
 
 
 def parse_json(s):
