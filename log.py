@@ -5,26 +5,51 @@ import logging.handlers
 import os
 from time import strftime
 
-LOG_FILENAME = strftime("logs\jd-buyer_%Y_%m_%d_%H.log")
+from config import global_config
 
-logger = logging.getLogger()
-
+# 日志文件路径
+LOG_FILENAME = strftime("logs/jd-buyer_%Y_%m_%d_%H.log")
 
 def set_logger():
-    path = os.path.dirname(os.getcwd()+ '\\logs\\') # 判断日志目录
-    if not os.path.exists(path):
-        os.makedirs(path)
+    logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    # 判断日志文件父目录是否存在，不存在则创建
+    log_dir = os.path.dirname(LOG_FILENAME)
+    if not os.path.isdir(log_dir):
+        os.makedirs(log_dir)
+    # 定义handler的输出格式
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    
+    # 设置级别，使用默认值处理异常
+    try:
+        loglevel = global_config.get('config', 'log_level').upper()
+        if loglevel in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+            logger.setLevel(loglevel)
+    except:
+        # 默认INFO级别
+        logger.setLevel("INFO")
+    
+    # 添加handler
+    logger.addHandler(console)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # 输出到文件
+    try:
+        save_log = global_config.getboolean('config', 'save_log')
+    except:
+        save_log = True  # 默认保存日志
+        
+    if save_log:
+        # 每天生成新文件
+        file_handler = logging.handlers.TimedRotatingFileHandler(
+            LOG_FILENAME, when='midnight', interval=1, backupCount=7)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    # 返回
+    return logger
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        LOG_FILENAME, maxBytes=10485760, backupCount=5, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
-
-set_logger()
+# 导出
+logger = set_logger()

@@ -5,9 +5,11 @@ import sys
 import pickle
 import random
 import time
+import re
 import requests
 
 from lxml import etree
+from log import logger
 
 DEFAULT_TIMEOUT = 10
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36'
@@ -33,14 +35,44 @@ class Session(object):
         self.isLogin = False
         self.password = None
         self.sess = requests.session()
+        # 短信登录相关参数
+        self.s_token = None
+        self.guid = None
+        self.lsid = None
+        self.phone = None
+        
         try:
+            logger.info("初始化时尝试加载cookies...")
             self.loadCookies()
-        except Exception:
+        except Exception as e:
+            logger.error(f"初始化加载cookies失败: {e}")
             pass
+        
+        # 创建调试目录
+        self.debug_dir = os.path.join(absPath, 'debug_html')
+        if not os.path.exists(self.debug_dir):
+            os.makedirs(self.debug_dir)
+
+    # 保存HTML内容到文件
+    def saveHtml(self, html_content, filename_prefix):
+        """保存HTML内容到文件，用于调试
+        :param html_content: HTML内容
+        :param filename_prefix: 文件名前缀
+        """
+        filename = f"{filename_prefix}.html"
+        filepath = os.path.join(self.debug_dir, filename)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"已保存HTML到文件: {filepath}")
+        return filepath
 
     ############## 登录相关 #############
     # 保存 cookie
     def saveCookies(self):
+        """保存Cookie到文件
+        """
         cookiesFile = os.path.join(
             absPath, './cookies/{0}.cookies'.format(self.username))
         directory = os.path.dirname(cookiesFile)
@@ -48,15 +80,40 @@ class Session(object):
             os.makedirs(directory)
         with open(cookiesFile, 'wb') as f:
             pickle.dump(self.sess.cookies, f)
+        logger.info("已保存Cookie到文件")
 
     # 加载 cookie
     def loadCookies(self):
-        cookiesFile = os.path.join(
-            absPath, './cookies/{0}.cookies'.format(self.username))
-        with open(cookiesFile, 'rb') as f:
-            local_cookies = pickle.load(f)
-        self.sess.cookies.update(local_cookies)
-        self.isLogin = self._validateCookies()
+        """加载Cookie并验证是否有效
+        :return: 是否成功加载并验证Cookie True/False
+        """
+        try:
+            cookiesFile = os.path.join(
+                absPath, './cookies/{0}.cookies'.format(self.username))
+            
+            # 检查Cookie文件是否存在
+            if not os.path.exists(cookiesFile):
+                logger.error(f"Cookie文件不存在: {cookiesFile}")
+                return False
+                
+            # 加载Cookie文件
+            logger.info(f"正在加载Cookie文件: {cookiesFile}")
+            with open(cookiesFile, 'rb') as f:
+                local_cookies = pickle.load(f)
+            self.sess.cookies.update(local_cookies)
+            
+            # 验证Cookie是否有效
+            self.isLogin = self._validateCookies()
+            
+            if self.isLogin:
+                logger.info(f"Cookie验证成功，已登录状态")
+                return True
+            else:
+                logger.info(f"Cookie已过期，需要重新登录")
+                return False
+        except Exception as e:
+            logger.error(f"加载Cookie时出错: {e}")
+            return False
 
     # 验证 cookie
     def _validateCookies(self):
@@ -69,13 +126,22 @@ class Session(object):
             'rid': str(int(time.time() * 1000)),
         }
         try:
+            logger.info("正在验证Cookie有效性...")
             resp = self.sess.get(url=url, params=payload,
-                                 allow_redirects=False)
-            if self.respStatus(resp):
+                               allow_redirects=False)
+            
+            if resp.status_code == 200:
+                logger.info(f"Cookie有效，成功访问订单页面")
                 return True
+            else:
+                logger.info(f"Cookie无效，状态码: {resp.status_code}, 可能需要重新登录")
+                if resp.status_code == 302:
+                    logger.info(f"被重定向到: {resp.headers.get('Location', '未知页面')}")
         except Exception as e:
+            logger.error(f"验证Cookie时发生错误: {e}")
             return False
 
+        # 连接失败时，创建新会话
         self.sess = requests.session()
         return False
 
@@ -100,12 +166,24 @@ class Session(object):
         resp = self.sess.get(url=url, headers=headers, params=payload)
 
         if not self.respStatus(resp):
+            logger.error("获取二维码失败")
             return None
 
-        return resp.content
+        # 保存二维码图片
+        qrcode_path = os.path.join(absPath, 'QRcode.png')
+        with open(qrcode_path, 'wb') as f:
+            f.write(resp.content)
+        
+        logger.info(f"已保存二维码到: {qrcode_path}")
+        logger.info("请使用京东APP扫描二维码登录")
+        return qrcode_path
 
-    # 获取Ticket
-    def getQRcodeTicket(self):
+    # 检查二维码状态
+    def checkQRcodeStatus(self):
+        """
+        检查二维码状态
+        :return: 扫描状态 200-已扫描，201-未扫描，202-过期, 203-确认登录中
+        """
         url = 'https://qr.m.jd.com/check'
         payload = {
             'appid': '133',
@@ -120,13 +198,61 @@ class Session(object):
         resp = self.sess.get(url=url, headers=headers, params=payload)
 
         if not self.respStatus(resp):
-            return False
+            return None, -1, "请求失败"
 
         respJson = self.parseJson(resp.text)
-        if respJson['code'] != 200:
-            return None
+        
+        # 提取状态码
+        code = respJson.get('code', -1)
+        msg = respJson.get('msg', '未知状态')
+        
+        # 根据状态码返回对应信息
+        if code == 200:
+            # 已完成扫码
+            ticket = respJson.get('ticket')
+            return ticket, code, msg
         else:
-            return respJson['ticket']
+            # 其他状态
+            return None, code, msg
+
+    # 获取Ticket
+    def getQRcodeTicket(self):
+        """获取二维码票据
+        :return: (ticket, status_code, status_msg)
+                 ticket: 成功返回票据字符串，失败返回None
+                 status_code: 状态码，200-已扫描，201-未扫描，202-过期，203-确认登录中，其他-未知状态
+                 status_msg: 状态说明
+        """
+        url = 'https://qr.m.jd.com/check'
+        payload = {
+            'appid': '133',
+            'callback': 'jQuery{}'.format(random.randint(1000000, 9999999)),
+            'token': self.sess.cookies.get('wlfstk_smdl'),
+            '_': str(int(time.time() * 1000)),
+        }
+        headers = {
+            'User-Agent': self.userAgent,
+            'Referer': 'https://passport.jd.com/new/login.aspx',
+        }
+        resp = self.sess.get(url=url, headers=headers, params=payload)
+
+        if not self.respStatus(resp):
+            return None, -1, "请求失败"
+
+        respJson = self.parseJson(resp.text)
+        
+        # 提取状态码
+        code = respJson.get('code', -1)
+        msg = respJson.get('msg', '未知状态')
+        
+        # 根据状态码返回对应信息
+        if code == 200:
+            # 已完成扫码
+            ticket = respJson.get('ticket')
+            return ticket, code, msg
+        else:
+            # 其他状态
+            return None, code, msg
 
     # 验证Ticket
     def validateQRcodeTicket(self, ticket):
@@ -138,12 +264,193 @@ class Session(object):
         resp = self.sess.get(url=url, headers=headers, params={'t': ticket})
 
         if not self.respStatus(resp):
+            logger.error("验证二维码票据失败")
             return False
 
         respJson = json.loads(resp.text)
         if respJson['returnCode'] == 0:
+            logger.info("二维码登录成功")
             return True
         else:
+            logger.error(f"二维码登录失败: {respJson.get('message')}")
+            return False
+            
+    ############## 短信登录相关 #############
+    def getLoginPageForSMS(self):
+        """获取短信登录页所需的token等信息
+        :return: 是否成功获取信息 True/False
+        """
+        # 使用PC版登录页面代替移动版，可能更稳定
+        url = "https://passport.jd.com/new/login.aspx"
+        headers = {
+            'User-Agent': self.userAgent,
+            'Connection': 'Keep-Alive',
+            'Referer': 'https://www.jd.com/'
+        }
+        
+        try:
+            logger.info("正在获取登录页...")
+            resp = self.sess.get(url=url, headers=headers)
+            if not self.respStatus(resp):
+                logger.error("获取登录页失败")
+                return False
+                
+            # 保存页面用于调试
+            self.saveHtml(resp.text, "login_page_sms")
+            
+            # 检查是否已有必要的cookies
+            if self.sess.cookies.get('guid') and self.sess.cookies.get('lsid'):
+                self.guid = self.sess.cookies.get('guid')
+                self.lsid = self.sess.cookies.get('lsid')
+                logger.info(f"成功获取登录所需cookies: guid={self.guid}, lsid={self.lsid}")
+                return True
+                
+            # 如果没有通过cookies获取到token，尝试其他方式
+            logger.info("尝试直接初始化登录参数...")
+            self.guid = ''.join([str(random.randint(0, 9)) for _ in range(16)])
+            self.lsid = '{}-{}-{}-{}'.format(
+                ''.join([hex(random.randint(0, 15))[2:] for _ in range(8)]),
+                ''.join([hex(random.randint(0, 15))[2:] for _ in range(4)]),
+                ''.join([hex(random.randint(0, 15))[2:] for _ in range(4)]),
+                ''.join([hex(random.randint(0, 15))[2:] for _ in range(12)])
+            )
+            logger.info(f"成功初始化登录参数: guid={self.guid}, lsid={self.lsid}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"获取短信登录页时出错: {e}")
+            return False
+            
+    def getSMSCode(self, phone):
+        """获取短信验证码
+        :param phone: 手机号
+        :return: 是否成功发送短信 True/False
+        """
+        self.phone = phone
+        
+        # 确保已初始化必要的参数
+        if not hasattr(self, 'guid') or not self.guid:
+            self.guid = ''.join([str(random.randint(0, 9)) for _ in range(16)])
+            logger.info(f"自动生成guid: {self.guid}")
+            
+        # 请求发送验证码
+        url = "https://passport.jd.com/uc/login/sendMCode"
+        data = {
+            'phone': phone,
+            'guid': self.guid,
+            'appid': 133,
+            'returnurl': 'https://www.jd.com/',
+            'serviceCode': 'jd',
+            'smsType': 'sms'
+        }
+        headers = {
+            'User-Agent': self.userAgent,
+            'Referer': 'https://passport.jd.com/new/login.aspx',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://passport.jd.com'
+        }
+        
+        try:
+            logger.info(f"正在向手机 {phone} 发送验证码...")
+            resp = self.sess.post(url=url, headers=headers, data=data)
+            # 保存响应内容用于调试
+            self.saveHtml(resp.text, f"sms_code_response_{phone}")
+            
+            if not self.respStatus(resp):
+                logger.error("发送短信验证码请求失败")
+                return False
+                
+            # 尝试解析JSON响应
+            try:
+                resp_json = json.loads(resp.text)
+                if resp_json.get('success', False) or resp_json.get('code', -1) == 200:
+                    logger.info("短信验证码已发送，请注意查收")
+                    return True
+                else:
+                    logger.error(f"发送短信验证码失败: {resp_json.get('message', resp_json.get('msg', '未知错误'))}")
+                    return False
+            except:
+                # 如果无法解析JSON，检查是否包含成功标识
+                if "发送成功" in resp.text or "已发送" in resp.text:
+                    logger.info("短信验证码已发送，请注意查收")
+                    return True
+                    
+                logger.error(f"无法解析短信验证码响应: {resp.text[:100]}...")
+                return False
+                
+        except Exception as e:
+            logger.error(f"发送短信验证码时出错: {e}")
+            return False
+    
+    def verifySMSCode(self, sms_code):
+        """验证短信验证码
+        :param sms_code: 收到的短信验证码
+        :return: 是否成功登录 True/False
+        """
+        if not self.phone:
+            logger.error("手机号未设置，无法验证短信")
+            return False
+            
+        # PC版登录接口
+        url = "https://passport.jd.com/uc/loginService"
+        data = {
+            'uuid': self.guid if hasattr(self, 'guid') else '',
+            'phone': self.phone,
+            'authcode': sms_code,
+            'authCodeMethod': 4,  # 4表示短信验证码登录
+            'loginType': 3,
+            'returnurl': 'https://www.jd.com/',
+            'isVirtualKey': '1',
+            'isVerify': 'true',
+            'isOauth': 'false',
+            'isResetName': 'false',
+            'slideAppId': '',
+            'slideToken': '',
+        }
+        headers = {
+            'User-Agent': self.userAgent,
+            'Referer': 'https://passport.jd.com/new/login.aspx',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://passport.jd.com'
+        }
+        
+        try:
+            logger.info(f"正在验证短信验证码...")
+            resp = self.sess.post(url=url, headers=headers, data=data)
+            
+            # 保存响应内容用于调试
+            self.saveHtml(resp.text, "verify_sms_result")
+            
+            if not self.respStatus(resp):
+                logger.error("验证短信验证码请求失败")
+                return False
+            
+            # 首先尝试解析JSON响应
+            try:
+                resp_json = json.loads(resp.text)
+                if resp_json.get('success', False) or "成功" in resp.text:
+                    logger.info("短信验证码登录成功")
+                    self.isLogin = True
+                    self.saveCookies()
+                    return True
+                else:
+                    logger.error(f"短信验证码登录失败: {resp_json.get('message', resp_json.get('msg', '未知错误'))}")
+                    return False
+            except:
+                pass
+                
+            # 也可能是302重定向，或者其他格式的响应，检查Cookie是否有效
+            if self._validateCookies():
+                logger.info("短信验证码登录成功")
+                self.isLogin = True
+                self.saveCookies()
+                return True
+            else:
+                logger.error("短信验证码登录失败，检查验证码是否正确")
+                return False
+                
+        except Exception as e:
+            logger.error(f"验证短信验证码时出错: {e}")
             return False
 
     ############## 商品方法 #############
@@ -153,9 +460,9 @@ class Session(object):
         """
         # 直接访问商品页面获取信息
         url = 'https://item.jd.com/{}.html'.format(skuId)
+        logger.info(f"正在获取商品信息: {url}")
         headers = {
             'User-Agent': self.userAgent,
-            'Referer': 'https://www.jd.com/',
         }
         try:
             resp = self.sess.get(url=url, headers=headers)
@@ -163,6 +470,9 @@ class Session(object):
                 detail = dict(venderId='0')
                 self.itemDetails[skuId] = detail
                 return
+            
+            # 保存HTML内容用于调试
+            self.saveHtml(resp.text, f"item_detail_{skuId}")
                 
             html = etree.HTML(resp.text)
             
@@ -191,6 +501,7 @@ class Session(object):
             # 出错时设置默认值
             detail = dict(venderId='0')
             self.itemDetails[skuId] = detail
+            logger.error(f"获取商品信息出错: {e}")
 
     ############## 库存方法 #############
     def getItemStock(self, skuId, skuNum, areaId):
@@ -211,6 +522,9 @@ class Session(object):
             if not self.respStatus(resp):
                 return False
             
+            # 保存HTML内容用于调试
+            self.saveHtml(resp.text, f"item_stock_{skuId}")
+            
             html = etree.HTML(resp.text)
             # 检查是否有"无货"字样
             stock_status = html.xpath('//div[@class="store-prompt"]/text()')
@@ -221,6 +535,7 @@ class Session(object):
                        html.xpath('//a[@id="InitCartUrl"]')
             return len(has_stock) > 0
         except Exception as e:
+            logger.error(f"获取商品库存状态出错: {e}")
             return False
 
     ############## 购物车相关 #############
@@ -394,6 +709,9 @@ class Session(object):
             resp = self.sess.get(url=url, params=payload, headers=headers)
             if not self.respStatus(resp):
                 return
+            
+            # 保存HTML内容用于调试
+            self.saveHtml(resp.text, "checkout_page")
 
             html = etree.HTML(resp.text)
             self.eid = html.xpath("//input[@id='eid']/@value")
@@ -412,6 +730,7 @@ class Session(object):
             }
             return order_detail
         except Exception as e:
+            logger.error(f"获取结算页面出错: {e}")
             return
 
     def getPreSallCheckoutPage(self, skuId, skuNum=1):
@@ -427,6 +746,9 @@ class Session(object):
             resp = self.sess.get(url=url, headers=headers)
             if not self.respStatus(resp):
                 return
+            
+            # 保存HTML内容用于调试
+            self.saveHtml(resp.text, f"presale_checkout_{skuId}")
 
             html = etree.HTML(resp.text)
             # 提取商品页面信息
@@ -448,6 +770,7 @@ class Session(object):
                 
             return order_detail
         except Exception as e:
+            logger.error(f"获取预售商品结算页面出错: {e}")
             return
 
     def submitOrder(self, isYushou=False):
@@ -571,16 +894,3 @@ class Session(object):
         if resp.status_code != requests.codes.OK:
             return False
         return True
-
-
-if __name__ == '__main__':
-
-    print("开始测试")
-    # skuId = '10118287699614'
-    skuId = '10137555659077'
-    areaId = '18_1482_48942_49129'
-    skuNum = 1
-
-    session = Session()
-    session.fetchItemDetail(skuId)
-    print("商品库存状态:", session.getItemStock(skuId, skuNum, areaId))
