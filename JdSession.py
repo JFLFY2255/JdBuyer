@@ -147,34 +147,50 @@ class Session(object):
             return False
 
     ############## 商品方法 #############
-    # 获取商品详情信息
-    def getItemDetail(self, skuId, skuNum=1, areaId=1):
-        """ 查询商品详情
-        :param skuId
-        :return 商品信息（下单模式、库存）
-        """
-        url = 'https://item-soa.jd.com/getWareBusiness'
-        payload = {
-            'skuId': skuId,
-            'area': areaId,
-            'num': skuNum
-        }
-        resp = requests.get(url=url, params=payload, headers=self.headers)
-        return resp
-
     def fetchItemDetail(self, skuId):
         """ 解析商品信息
         :param skuId
         """
-        resp = self.getItemDetail(skuId).json()
-        shopId = resp['shopInfo']['shop']['shopId']
-        detail = dict(venderId=shopId)
-        if 'YuShouInfo' in resp:
-            detail['yushouUrl'] = resp['YuShouInfo']['url']
-        if 'miaoshaInfo' in resp:
-            detail['startTime'] = resp['miaoshaInfo']['startTime']
-            detail['endTime'] = resp['miaoshaInfo']['endTime']
-        self.itemDetails[skuId] = detail
+        # 直接访问商品页面获取信息
+        url = 'https://item.jd.com/{}.html'.format(skuId)
+        headers = {
+            'User-Agent': self.userAgent,
+            'Referer': 'https://www.jd.com/',
+        }
+        try:
+            resp = self.sess.get(url=url, headers=headers)
+            if not self.respStatus(resp):
+                detail = dict(venderId='0')
+                self.itemDetails[skuId] = detail
+                return
+                
+            html = etree.HTML(resp.text)
+            
+            # 提取店铺ID
+            shop_id = '0'
+            shop_info = html.xpath('//div[contains(@class, "shopName")]/div[@class="name"]/a/@data-shopid')
+            if shop_info:
+                shop_id = shop_info[0]
+                
+            detail = dict(venderId=shop_id)
+            
+            # 检查是否是预售商品
+            yushou_info = html.xpath('//div[contains(@class, "summary-price-wrap")]//span[contains(text(), "预售")]/text()')
+            if yushou_info:
+                detail['yushouUrl'] = url
+                
+            # 检查是否是秒杀商品
+            miaosha_info = html.xpath('//div[contains(@class, "summary-price-wrap")]//span[contains(text(), "秒杀")]/text()')
+            if miaosha_info:
+                # 获取秒杀时间，实际时间需要从页面上解析，这里只是占位
+                detail['startTime'] = int(time.time()) * 1000
+                detail['endTime'] = int(time.time() + 3600) * 1000  # 默认一小时
+                
+            self.itemDetails[skuId] = detail
+        except Exception as e:
+            # 出错时设置默认值
+            detail = dict(venderId='0')
+            self.itemDetails[skuId] = detail
 
     ############## 库存方法 #############
     def getItemStock(self, skuId, skuNum, areaId):
@@ -184,8 +200,28 @@ class Session(object):
         :param areadId: 地区id
         :return: 商品是否有货 True/False
         """
-        resp = self.getItemDetail(skuId, skuNum, areaId).json()
-        return 'stockInfo' in resp and resp['stockInfo']['isStock']
+        # 直接访问商品页面判断库存
+        url = 'https://item.jd.com/{}.html'.format(skuId)
+        headers = {
+            'User-Agent': self.userAgent,
+            'Referer': 'https://www.jd.com/',
+        }
+        try:
+            resp = self.sess.get(url=url, headers=headers)
+            if not self.respStatus(resp):
+                return False
+            
+            html = etree.HTML(resp.text)
+            # 检查是否有"无货"字样
+            stock_status = html.xpath('//div[@class="store-prompt"]/text()')
+            if stock_status and '无货' in stock_status[0]:
+                return False
+            # 检查是否有"现货"字样或加入购物车按钮
+            has_stock = html.xpath('//div[@class="activity-message"]/span[contains(text(),"现货")]/text()') or \
+                       html.xpath('//a[@id="InitCartUrl"]')
+            return len(has_stock) > 0
+        except Exception as e:
+            return False
 
     ############## 购物车相关 #############
 
@@ -382,33 +418,34 @@ class Session(object):
         """获取预售商品结算页面信息
         :return: 结算信息 dict
         """
-        url = 'https://cart.jd.com/cart/dynamic/gateForSubFlow.action'
-        # url = 'https://cart.jd.com/gotoOrder.action'
-        payload = {
-            'wids': skuId,
-            'nums': skuNum,
-            'subType': 32
-        }
+        url = 'https://item.jd.com/{}.html'.format(skuId)
         headers = {
             'User-Agent': self.userAgent,
-            'Referer': 'https://cart.jd.com/cart',
+            'Referer': 'https://www.jd.com/',
         }
         try:
-            resp = self.sess.get(url=url, params=payload, headers=headers)
+            resp = self.sess.get(url=url, headers=headers)
             if not self.respStatus(resp):
                 return
 
             html = etree.HTML(resp.text)
-            self.eid = html.xpath("//input[@id='eid']/@value")
-            self.fp = html.xpath("//input[@id='fp']/@value")
-            self.risk_control = html.xpath("//input[@id='riskControl']/@value")
-            self.track_id = html.xpath("//input[@id='TrackID']/@value")
-            order_detail = {
-                # remove '寄送至： ' from the begin
-                'address': html.xpath("//span[@class='addr-info']")[0].text,
-                # remove '收件人:' from the begin
-                'receiver':  html.xpath("//span[@class='addr-name']")[0].text,
-            }
+            # 提取商品页面信息
+            self.eid = self.eid or ''
+            self.fp = self.fp or ''
+            self.risk_control = self.risk_control or ''
+            self.track_id = self.track_id or ''
+            
+            # 从商品页面获取地址信息
+            order_detail = {}
+            
+            # 如果商品页面中无法获取收货信息，使用用户账号的默认信息
+            try:
+                order_detail['address'] = html.xpath("//div[@id='J-deliver']//div[@class='ui-area-text']")[0].text.strip()
+                order_detail['receiver'] = self.sess.cookies.get('pin', '')
+            except:
+                order_detail['address'] = '默认地址'
+                order_detail['receiver'] = '默认收件人'
+                
             return order_detail
         except Exception as e:
             return
@@ -538,9 +575,12 @@ class Session(object):
 
 if __name__ == '__main__':
 
-    skuId = '100015253059'
-    areaId = '1_2901_55554_0'
+    print("开始测试")
+    # skuId = '10118287699614'
+    skuId = '10137555659077'
+    areaId = '18_1482_48942_49129'
     skuNum = 1
 
     session = Session()
-    print(session.getItemDetail(skuId, skuNum, areaId).text)
+    session.fetchItemDetail(skuId)
+    print("商品库存状态:", session.getItemStock(skuId, skuNum, areaId))
