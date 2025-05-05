@@ -169,14 +169,7 @@ class Session(object):
             logger.error("获取二维码失败")
             return None
 
-        # 保存二维码图片
-        qrcode_path = os.path.join(absPath, 'QRcode.png')
-        with open(qrcode_path, 'wb') as f:
-            f.write(resp.content)
-        
-        logger.info(f"已保存二维码到: {qrcode_path}")
-        logger.info("请使用京东APP扫描二维码登录")
-        return qrcode_path
+        return resp.content
 
     # 检查二维码状态
     def checkQRcodeStatus(self):
