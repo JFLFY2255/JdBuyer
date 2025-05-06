@@ -6,6 +6,7 @@ import os
 import random
 import re
 from base64 import b64encode
+import time
 
 import requests
 from Crypto.PublicKey import RSA
@@ -120,22 +121,89 @@ def response_status(resp):
 
 
 def open_image(image_file):
+    """打开图片文件
+    :param image_file: 图片文件路径
+    :return: 图片进程对象，在Windows上可能为None
+    """
+    process = None
     try:
         if os.name == "nt":
-            os.system('start ' + image_file)  # for Windows
+            # Windows系统使用start命令，无法获取进程对象
+            os.system('start ' + image_file)
         else:
+            import subprocess
             if os.uname()[0] == "Linux":
                 if "deepin" in os.uname()[2]:
-                    os.system("deepin-image-viewer " + image_file)  # for deepin
+                    # Deepin Linux
+                    process = subprocess.Popen(["deepin-image-viewer", image_file])
                 else:
-                    os.system("eog " + image_file)  # for Linux
+                    # 其他Linux发行版
+                    process = subprocess.Popen(["eog", image_file])
             else:
-                os.system("open " + image_file)  # for Mac
+                # macOS
+                process = subprocess.Popen(["open", image_file])
+                
         logger.info(f"已打开图片: {image_file}")
-        return True
+        return process
     except Exception as e:
         logger.error(f"打开图片失败: {e}")
+        return None
+
+
+def is_process_running(process):
+    """检查进程是否正在运行
+    :param process: 进程对象
+    :return: 是否正在运行
+    """
+    if not process:
+        logger.debug("进程对象为None，返回False")
         return False
+        
+    try:
+        # 记录进程的一些信息
+        logger.debug(f"检查进程状态: {process}")
+        
+        # 检查是否是macOS平台
+        is_macos = os.name != 'nt' and hasattr(os, 'uname') and os.uname()[0] == 'Darwin'
+        if is_macos:
+            # macOS平台上永远返回运行中
+            logger.debug("macOS平台，默认返回运行中")
+            return True
+        
+        # 非macOS平台：poll()返回None表示进程正在运行，返回其他值表示进程已结束
+        poll_result = process.poll()
+        logger.debug(f"进程poll()返回值: {poll_result}")
+        
+        is_running = poll_result is None
+        logger.debug(f"进程运行状态: {'运行中' if is_running else '已结束'}")
+        
+        return is_running
+    except Exception as e:
+        logger.error(f"检查进程状态时出错: {e}")
+        return False
+
+
+def close_image(process):
+    """关闭图片查看器进程
+    :param process: 进程对象
+    """
+    if not process:
+        # 没有进程对象，可能是Windows平台或已被关闭
+        return
+        
+    try:
+        # 检查进程是否还在运行
+        if not is_process_running(process):
+            # 进程已经结束，可能被用户手动关闭
+            logger.info("图片查看器已被手动关闭")
+            return
+            
+        # 进程仍在运行，尝试关闭
+        process.terminate()
+        logger.info("已自动关闭图片查看器")
+    except Exception as e:
+        logger.error(f"关闭图片查看器失败: {e}")
+        # 即使关闭失败也继续
 
 
 def save_image(resp, image_file):

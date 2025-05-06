@@ -187,12 +187,19 @@ class Session(object):
         payload = {
             'rid': str(int(time.time() * 1000)),
         }
-        headers = {
-            'User-Agent': self.userAgent,
-            'cookie': 'shshshfpa=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; shshshfpx=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; __jdv=94967808|www.popmart.com.cn|-|referral|-|1746123672002; __jdu=17461236720021421729451; user-key=4d8730bf-8f59-468e-8914-886a49fb743a; PCSYCityID=CN_110000_110100_0; areaId=18; ipLoc-djd=1-2901-55565-0.9504675402; ipLocation=%u5317%u4eac; umc_count=1; jsavif=1; jsavif=1; o2State=; TrackID=13VktL_GIhCvEeKRSK9MSW6aYHoMDx-pEnzcb6gkhk_4c_yoboAxyNZQDXzNETegqQce9lWRPMtNxFkKYfpBlTtG8Qu9w1o67eUw2M3RacT1DrRkQu_VMy51i9FGQpbZ-; thor=442A1477C204DB7E5DA32115556DA7388E98EBF52DE77AAE1DD0FB55873F6B5915D98B6A12BC1ABA65C034DEC0CF31550250B09F7689D91504AB506A1D0696EEF00594E44C899792EA8549CD04E7ED0C45537F4F880CA28DA34EA53394D727E06DCB9FAFBF870DC06AC644B9B814ECAEC33C47EE4312926FB6DED7417140A9F1FEDEE347BC5B2B997184198E77B76786; light_key=AASBKE7rOxgWQziEhC_QY6ya-ON8QiPjWlvS75DDHhhNctqzLSInsNA2muIOFuqu5286Tw4G; pinId=mceLUjN9-aN4LF7FK8COGg; pin=JFLFY2255; unick=n1c2yrutn99v5l; ceshi3.com=000; _tp=NObGvZOrUmvIDNZgnBTkJA%3D%3D; _pst=JFLFY2255; cn=27; 3AB9D23F7A4B3C9B=BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7Q; flash=3_MftHLZPBhgtC8y3uEN1mJJUJ9kmLPCGIdb4UMO5VlMrCnJ9iKEEqUWo33Ce3EugYEY49zFEBXKhRWGpnZfiy_2kV_pOsXA7puAOR6cJRoTdvSlZnLbRkfaJVmMYBgLU4ccp3pkrHXWQiSwu5JKoiMPaMWyPd7cMPCwkQmxwDqsbF; 3AB9D23F7A4B3CSS=jdd03BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7QAAAAMWT5NJK6AAAAAADM66W7ZBUDISOIX; _gia_d=1; token=2225647c427355c3439744597229896c,3,970239; __jda=181111935.17461236720021421729451.1746123672.1746412013.1746423518.7; __jdc=181111935; mt_xid=V2_52007VwMUV1pYUVgYTxpdBGQDF1FdXlFSGk0ZbARlAxQCXAsGRhcZTF4ZYlZGUEEIV18eVUlaA25XQAYICFFTHHkaXQZjHxNWQVlWSx9NEl4FbAIRYl9oUmoWQRlaBGcHFldaXFdTG0EeXQJnMxdTVF4%3D; shshshfpb=BApXSFJJTnPNAwkUa1SReRwfYm7fSlMbyBgRTMV9p9xJ1MiSADo62; __jdb=181111935.56.17461236720021421729451|7.1746423518; sdtoken=AAbEsBpEIOVjqTAKCQtvQu17_YJ0StieaDcBLBamrqqvx9ozkWiCevaEIqlKNTBHLqW7g3_6u796RhhDu-rvxbkBeVSbYFWzW_4MTCr84fokZkmRCKZWYxVkXA7YfV8RuQTuERp-whlit7f3KU91tG7hIIyS74bfmA',
-        }
         try:
             logger.info("正在验证Cookie有效性...")
+            
+            # 从配置文件中获取cookie
+            from config import global_config
+            cookie_str = global_config.get('account', 'cookie', raw=True)
+            
+            # 构建请求头，明确包含cookie
+            headers = {
+                'User-Agent': self.userAgent,
+                'cookie': cookie_str
+            }
+            
             resp = self.sess.get(url=url, params=payload, headers=headers, allow_redirects=False)
             
             if resp.status_code == 200:
@@ -523,17 +530,21 @@ class Session(object):
 
     ############## 商品方法 #############
     def fetchItemDetail(self, skuId):
-        """ 解析商品信息
-        :param skuId
+        """获取商品信息
+        :param skuId: 商品id
         """
         # 直接访问商品页面获取信息
         url = 'https://item.jd.com/{}.html'.format(skuId)
         logger.info(f"正在获取商品信息: {url}")
         
-        # 使用提供的完整请求头信息
+        # 从配置文件中获取cookie
+        from config import global_config
+        cookie_str = global_config.get('account', 'cookie', raw=True)
+        
+        # 构建请求头，明确包含cookie
         headers = {
             'User-Agent': self.userAgent,
-            'cookie': 'shshshfpa=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; shshshfpx=df34eb0a-2763-b0f3-b511-f2c069527728-1746123670; __jdv=94967808|www.popmart.com.cn|-|referral|-|1746123672002; __jdu=17461236720021421729451; user-key=4d8730bf-8f59-468e-8914-886a49fb743a; PCSYCityID=CN_110000_110100_0; areaId=18; ipLoc-djd=1-2901-55565-0.9504675402; ipLocation=%u5317%u4eac; umc_count=1; jsavif=1; jsavif=1; o2State=; TrackID=13VktL_GIhCvEeKRSK9MSW6aYHoMDx-pEnzcb6gkhk_4c_yoboAxyNZQDXzNETegqQce9lWRPMtNxFkKYfpBlTtG8Qu9w1o67eUw2M3RacT1DrRkQu_VMy51i9FGQpbZ-; thor=442A1477C204DB7E5DA32115556DA7388E98EBF52DE77AAE1DD0FB55873F6B5915D98B6A12BC1ABA65C034DEC0CF31550250B09F7689D91504AB506A1D0696EEF00594E44C899792EA8549CD04E7ED0C45537F4F880CA28DA34EA53394D727E06DCB9FAFBF870DC06AC644B9B814ECAEC33C47EE4312926FB6DED7417140A9F1FEDEE347BC5B2B997184198E77B76786; light_key=AASBKE7rOxgWQziEhC_QY6ya-ON8QiPjWlvS75DDHhhNctqzLSInsNA2muIOFuqu5286Tw4G; pinId=mceLUjN9-aN4LF7FK8COGg; pin=JFLFY2255; unick=n1c2yrutn99v5l; ceshi3.com=000; _tp=NObGvZOrUmvIDNZgnBTkJA%3D%3D; _pst=JFLFY2255; cn=27; 3AB9D23F7A4B3C9B=BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7Q; flash=3_MftHLZPBhgtC8y3uEN1mJJUJ9kmLPCGIdb4UMO5VlMrCnJ9iKEEqUWo33Ce3EugYEY49zFEBXKhRWGpnZfiy_2kV_pOsXA7puAOR6cJRoTdvSlZnLbRkfaJVmMYBgLU4ccp3pkrHXWQiSwu5JKoiMPaMWyPd7cMPCwkQmxwDqsbF; 3AB9D23F7A4B3CSS=jdd03BS5AXYPPARGL5ELOL4CVTT2ZKW33FKUNJJVCMFOI5FYOZVKVWYXFMRCRAJRXEEUMZRWDYNL4ARN5OWB44JR77IGG7QAAAAMWT5NJK6AAAAAADM66W7ZBUDISOIX; _gia_d=1; token=2225647c427355c3439744597229896c,3,970239; __jda=181111935.17461236720021421729451.1746123672.1746412013.1746423518.7; __jdc=181111935; mt_xid=V2_52007VwMUV1pYUVgYTxpdBGQDF1FdXlFSGk0ZbARlAxQCXAsGRhcZTF4ZYlZGUEEIV18eVUlaA25XQAYICFFTHHkaXQZjHxNWQVlWSx9NEl4FbAIRYl9oUmoWQRlaBGcHFldaXFdTG0EeXQJnMxdTVF4%3D; shshshfpb=BApXSFJJTnPNAwkUa1SReRwfYm7fSlMbyBgRTMV9p9xJ1MiSADo62; __jdb=181111935.56.17461236720021421729451|7.1746423518; sdtoken=AAbEsBpEIOVjqTAKCQtvQu17_YJ0StieaDcBLBamrqqvx9ozkWiCevaEIqlKNTBHLqW7g3_6u796RhhDu-rvxbkBeVSbYFWzW_4MTCr84fokZkmRCKZWYxVkXA7YfV8RuQTuERp-whlit7f3KU91tG7hIIyS74bfmA',
+            'cookie': cookie_str
         }
 
         logger.info(f"使用 User-Agent: {headers.get('user-agent', self.userAgent)}") # 获取实际使用的UA

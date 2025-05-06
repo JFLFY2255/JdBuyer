@@ -11,7 +11,9 @@ from timer import Timer
 from utils import (
     save_image,
     open_image,
-    send_wechat
+    close_image,
+    send_wechat,
+    is_process_running
 )
 
 
@@ -97,6 +99,9 @@ class Buyer(object):
         """
         logger.info('开始二维码登录流程...')
         
+        # 关闭二维码图片后的等待时间(秒)
+        QR_CLOSE_WAIT_TIME = 3
+        
         # 下载二维码
         qrCode = self.session.getQRcode()
         if not qrCode:
@@ -113,9 +118,9 @@ class Buyer(object):
         logger.info(f'二维码已保存到: {fileName}')
         
         # 尝试自动打开图片
-        if open_image(fileName):
-            logger.info('已自动打开二维码图片，请用京东APP扫描')
-        else:
+        qr_process = open_image(fileName)
+        
+        if not qr_process:
             logger.warning(f'无法自动打开二维码，请手动打开文件并使用京东APP扫描: {os.path.abspath(fileName)}')
         
         # 获取二维码票据
@@ -123,9 +128,23 @@ class Buyer(object):
         retryTimes = 60
         status_code = 0
         status_msg = ""
+        manually_closed = False
+        close_time = None
         
         # 循环检查二维码状态
         for i in range(retryTimes):
+            # 检查图片是否被手动关闭
+            if qr_process and not manually_closed and not is_process_running(qr_process):
+                manually_closed = True
+                close_time = time.time()
+                logger.info(f"检测到二维码图片已被手动关闭，将继续等待{QR_CLOSE_WAIT_TIME}秒确认是否成功扫描...")
+            
+            # 检查是否已超过等待时间且没有票据
+            if manually_closed and close_time and not ticket and (time.time() - close_time > QR_CLOSE_WAIT_TIME):
+                # 如果图片被手动关闭超过指定时间，且没有获取到票据，判定为失败
+                logger.error(f'二维码图片已被手动关闭，超过{QR_CLOSE_WAIT_TIME}秒未检测到成功扫描，判定为登录失败')
+                return False
+            
             ticket, status_code, status_msg = self.session.getQRcodeTicket()
             
             # 打印每次检查的状态
@@ -136,12 +155,20 @@ class Buyer(object):
                 logger.info('获取到二维码票据，正在验证...')
                 break
             elif status_msg.find("二维码已取消授权") != -1 or status_msg.find("二维码已过期") != -1 or status_msg.find("二维码已失效") != -1:
-                # 二维码已过期
+                # 二维码已过期，关闭图片查看器（如果未被手动关闭）
+                if not manually_closed and qr_process:
+                    close_image(qr_process)
+                    logger.info('已关闭二维码图片查看器')
                 logger.error(f'{status_msg}，请重新获取')
                 return False
             
             # 未扫描或其他状态，等待一段时间后继续检查
             time.sleep(2)
+        
+        # 关闭图片查看器（如果未被手动关闭）
+        if not manually_closed and qr_process:
+            close_image(qr_process)
+            logger.info('已关闭二维码图片查看器')
         
         # 检查是否成功获取票据
         if not ticket:
@@ -273,24 +300,23 @@ def show_usage():
 
 
 if __name__ == '__main__':
-    # 商品sku
-    # skuId = '10118287699614'
-    skuId = '10137555659077'
-    # skuId = '10098249630626'
-    # skuId = '100015253059'
-    # 区域id(可根据工程 area_id 目录查找)
-    # areaId = '18_1482_48942_49129'
-    areaId = '1_2901_55554_0'
-    # 购买数量
-    skuNum = 1
-    # 库存查询间隔(秒)
-    stockInterval = 3
-    # 监听库存后尝试下单次数
-    submitRetry = 3
-    # 下单尝试间隔(秒)
-    submitInterval = 5
-    # 程序开始执行时间(晚于当前时间立即执行，适用于定时抢购类)
-    buyTime = '2022-10-10 00:00:00'
+    # 从配置文件获取商品信息
+    skuId = global_config.get('item', 'sku_id', raw=True)
+    areaId = global_config.get('item', 'area_id', raw=True)
+    skuNum = int(global_config.get('item', 'amount'))
+    stockInterval = int(global_config.get('item', 'stock_interval'))
+    submitRetry = int(global_config.get('item', 'submit_retry'))
+    submitInterval = int(global_config.get('item', 'submit_interval'))
+    buyTime = global_config.get('item', 'buy_time')
+    
+    # 参数检查
+    if not skuId:
+        logger.error("商品ID未设置，请检查配置文件")
+        sys.exit(1)
+        
+    if not areaId:
+        logger.error("区域ID未设置，请检查配置文件")
+        sys.exit(1)
 
     buyer = Buyer()  # 初始化
     
