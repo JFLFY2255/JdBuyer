@@ -57,6 +57,7 @@ class Session(object):
                 cookie_str = global_config.get('account', 'cookie', raw=True)
                 if cookie_str and len(cookie_str) > 10:
                     logger.info('尝试从配置文件加载Cookie...')
+                    logger.info(f"配置文件中cookie长度为: {len(cookie_str)}")
                     cookies_loaded, error_msg = self.updateCookies(cookie_str)
                     if cookies_loaded:
                         logger.info("配置文件中的cookie加载成功")
@@ -166,15 +167,27 @@ class Session(object):
             if len(cookie_str) < 10:
                 return False, '配置文件中Cookie为空或过短，更新失败'
             
-            # 将cookie字符串转换为字典
-            cookie_dict = {}
-            for item in cookie_str.split(';'):
-                if '=' in item:
-                    name, value = item.strip().split('=', 1)
-                    cookie_dict[name] = value
+            # 检查是否包含京东关键cookie
+            contains_pt_key = 'pt_key=' in cookie_str
+            contains_pt_pin = 'pt_pin=' in cookie_str
             
-            # 更新session的cookies
-            self.sess.cookies.update(cookie_dict)
+            if not (contains_pt_key and contains_pt_pin):
+                logger.warning("配置文件中的cookie字符串缺少pt_key或pt_pin，可能影响登录")
+            
+            # 创建RequestsCookieJar并正确设置域名
+            jar = requests.cookies.RequestsCookieJar()
+            
+            # 解析cookie字符串并添加到jar，设置正确的域名
+            for cookie_item in cookie_str.split(';'):
+                if '=' in cookie_item:
+                    name, value = cookie_item.strip().split('=', 1)
+                    # 为所有cookie设置.jd.com域名
+                    jar.set(name, value, domain='.jd.com', path='/')
+            
+            # 将jar替换会话中的cookies
+            self.sess.cookies = jar
+            
+            logger.info(f"从字符串更新cookies完成，session包含 {len(self.sess.cookies)} 个cookies")
             return True, None
 
     # 验证 cookie
@@ -190,16 +203,13 @@ class Session(object):
         try:
             logger.info("正在验证Cookie有效性...")
             
-            # 从配置文件中获取cookie
-            from config import global_config
-            cookie_str = global_config.get('account', 'cookie', raw=True)
-            
-            # 构建请求头，明确包含cookie
+            # 添加User-Agent头
             headers = {
                 'User-Agent': self.userAgent,
-                'cookie': cookie_str
+                'Referer': 'https://www.jd.com/',
             }
             
+            # 使用完整的headers
             resp = self.sess.get(url=url, params=payload, headers=headers, allow_redirects=False)
             
             if resp.status_code == 200:
@@ -213,7 +223,7 @@ class Session(object):
                     # 添加额外的尝试，访问京东首页检查登录状态
                     try:
                         logger.info("尝试访问京东首页检查登录状态...")
-                        home_resp = self.sess.get('https://www.jd.com/')
+                        home_resp = self.sess.get('https://www.jd.com/', headers=headers)
                         if 'nickname' in home_resp.text:
                             logger.info("首页访问成功且包含用户信息")
                             return True
@@ -537,17 +547,13 @@ class Session(object):
         url = 'https://item.jd.com/{}.html'.format(skuId)
         logger.info(f"正在获取商品信息: {url}")
         
-        # 从配置文件中获取cookie
-        from config import global_config
-        cookie_str = global_config.get('account', 'cookie', raw=True)
-        
-        # 构建请求头，明确包含cookie
+        # 使用完整的headers
         headers = {
             'User-Agent': self.userAgent,
-            'cookie': cookie_str
+            'Referer': 'https://www.jd.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Connection': 'keep-alive',
         }
-
-        logger.info(f"使用 User-Agent: {headers.get('user-agent', self.userAgent)}") # 获取实际使用的UA
 
         try:
             logger.info(f"开始请求商品页面: {url}")
@@ -615,8 +621,8 @@ class Session(object):
     def getItemStock(self, skuId, skuNum, areaId):
         """获取单个商品库存状态
         :param skuId: 商品id
-        :param num: 商品数量
-        :param areadId: 地区id
+        :param skuNum: 商品数量
+        :param areaId: 地区id
         :return: 商品是否有货 True/False
         """
         # 直接访问商品页面判断库存
@@ -624,10 +630,13 @@ class Session(object):
         headers = {
             'User-Agent': self.userAgent,
             'Referer': 'https://www.jd.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Connection': 'keep-alive',
         }
         try:
             resp = self.sess.get(url=url, headers=headers)
             if not self.respStatus(resp):
+                logger.error(f"获取商品库存状态失败: HTTP状态码 {resp.status_code}")
                 return False
             
             # 保存HTML内容用于调试
@@ -637,11 +646,14 @@ class Session(object):
             # 检查是否有"无货"字样
             stock_status = html.xpath('//div[@class="store-prompt"]/text()')
             if stock_status and '无货' in stock_status[0]:
+                logger.info(f"商品 {skuId} 当前无货")
                 return False
             # 检查是否有"现货"字样或加入购物车按钮
             has_stock = html.xpath('//div[@class="activity-message"]/span[contains(text(),"现货")]/text()') or \
                        html.xpath('//a[@id="InitCartUrl"]')
-            return len(has_stock) > 0
+            stock_result = len(has_stock) > 0
+            logger.info(f"商品 {skuId} 库存状态: {'有货' if stock_result else '无货'}")
+            return stock_result
         except Exception as e:
             logger.error(f"获取商品库存状态出错: {e}")
             return False
@@ -994,9 +1006,30 @@ class Session(object):
         self.sess.post(url=url, data=data, headers=headers)
 
     def parseJson(self, s):
-        begin = s.find('{')
-        end = s.rfind('}') + 1
-        return json.loads(s[begin:end])
+        """解析包含jQuery回调的JSON字符串
+        :param s: 响应文本，如：jQuery123456({"code":123,"msg":"success"})
+        :return: JSON对象
+        """
+        try:
+            # 尝试直接查找第一个 { 和最后一个 }
+            begin = s.find('{')
+            end = s.rfind('}') + 1
+            if begin >= 0 and end > 0:
+                json_str = s[begin:end]
+                return json.loads(json_str)
+            else:
+                # 如果找不到 { }, 尝试另一种格式
+                logger.warning(f"无法在响应中找到JSON: {s[:100]}...")
+                # 尝试提取回调参数
+                match = re.search(r'\((.*)\)', s)
+                if match:
+                    return json.loads(match.group(1))
+                else:
+                    logger.error(f"无法解析响应为JSON: {s[:100]}...")
+                    return {'code': -1, 'msg': '解析失败'}
+        except Exception as e:
+            logger.error(f"解析JSON出错: {e}, 原始内容: {s[:100]}...")
+            return {'code': -1, 'msg': str(e)}
 
     def respStatus(self, resp):
         if resp.status_code != requests.codes.OK:
