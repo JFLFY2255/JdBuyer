@@ -25,5 +25,17 @@ class Config(object):
     def getboolean(self, section, name):
         return self._config.getboolean(section, name)
 
+    def has_option(self, section, option):
+        """检查配置文件中是否存在指定的选项
+        
+        Args:
+            section: 配置文件中的节名称
+            option: 需要检查的选项名称
+            
+        Returns:
+            bool: 如果选项存在则返回True，否则返回False
+        """
+        return self._config.has_option(section, option)
+
 
 global_config = Config()

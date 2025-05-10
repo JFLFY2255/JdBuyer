@@ -669,190 +669,139 @@ class Session(object):
 
     ############## 购物车相关 #############
 
-    def uncheckCartAll(self):
+    def uncheckCartAll(self, areaId):
         """ 取消所有选中商品
+        
+        **开发记录**：取消勾选购物车需要提供正确的h5st信息，t、user-key、area-id等字段都要一致，并且IP地址绑定国家
+        
         return 购物车信息
         """
-        # 主API接口
         url = 'https://api.m.jd.com/api'
 
+        # 根据curl指令设置正确的headers
         headers = {
-            'User-Agent': self.userAgent,
-            'Content-Type': 'application/x-www-form-urlencoded',
+            'user-agent': self.userAgent,
             'origin': 'https://cart.jd.com',
-            'referer': 'https://cart.jd.com'
+            'referer': 'https://cart.jd.com/',
+            'x-referer-page': 'https://cart.jd.com/cart_index',
+            'x-rp-client': 'h5_1.0.0'
         }
 
-        # 主请求参数
-        data = {
+        # 获取区域信息，如果没有则使用空字符串
+        user_key = ""
+        h5st = ""
+        
+        # 尝试从配置中获取值
+        try:
+            from config import global_config
+            # 尝试从配置获取h5st值
+            try:
+                h5st = global_config.get('account', 'h5st', raw=True)
+                logger.info("从配置文件读取到h5st值")
+            except Exception:
+                # 如果配置中没有该项，会抛出异常
+                logger.info("配置文件中未找到h5st值")
+                
+            # 可以尝试从cookie中获取user-key
+            if hasattr(self.sess, 'cookies') and self.sess.cookies.get('user-key'):
+                user_key = self.sess.cookies.get('user-key')
+        except Exception as e:
+            logger.warning(f"从配置读取参数时出错: {e}")
+            logger.info("使用默认值继续")
+
+        # 构建完整的body
+        body = {
+            "serInfo": {
+                "area": areaId,
+                "user-key": user_key
+            }
+        }
+        
+        # 转换为JSON字符串
+        body_json_string = json.dumps(body, separators=(',', ':'))
+
+        # 构建请求参数
+        request_params = {
             'functionId': 'pcCart_jc_cartUnCheckAll',
-            'appid': 'JDC_mall_cart',
-            'body': '{"serInfo":{"area":"","user-key":""}}',
-            'loginType': 3
+            'appid': 'JDC_mall_cart',  # 根据curl，使用JDC_mall_cart而不是item-v3
+            'loginType': 3,
+            'client': 'pc',
+            'clientVersion': '1.0.0',
+            'body': body_json_string,
+            't': 1746876308833,
         }
-
-        # 备用API接口
-        backup_url = 'https://cart.jd.com/cancelAllItem.action'
-        backup_headers = {
-            'User-Agent': self.userAgent,
-            'Referer': 'https://cart.jd.com/cart.action',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'X-Requested-With': 'XMLHttpRequest'
-        }
+        
+        if h5st:
+            request_params['h5st'] = h5st
 
         logger.info("开始取消勾选购物车中所有商品")
         
-        # 添加重试机制
-        max_retries = 1
-        retry_delay = 2  # 秒
+        # 记录请求信息用于调试
+        logger.debug("发起POST请求详情:")
+        logger.debug(f"  URL: {url}")
+        logger.debug(f"  Headers: {json.dumps(headers, indent=2)}")
+        logger.debug(f"  Params: {json.dumps(request_params, indent=2, ensure_ascii=False)}")
         
-        for retry in range(max_retries):
-            try:
-                if retry < 2:  # 前两次尝试主API
-                    current_url = url
-                    current_headers = headers
-                    current_data = data
-                    current_method = "POST"
-                    logger.info(f"第{retry+1}次尝试通过主API取消勾选购物车商品: {current_url}")
-                else:  # 最后一次尝试备用API
-                    current_url = backup_url
-                    current_headers = backup_headers
-                    current_data = None
-                    current_method = "GET"
-                    logger.info(f"尝试通过备用API取消勾选购物车商品: {current_url}")
-                
-                # 增加超时时间和多次尝试
-                if current_method == "POST":
-                    resp = self.sess.post(
-                        url=current_url, 
-                        headers=current_headers, 
-                        data=current_data,
-                        timeout=15
-                    )
-                else:
-                    resp = self.sess.get(
-                        url=current_url, 
-                        headers=current_headers,
-                        timeout=15
-                    )
-                
-                # 保存响应内容用于调试
-                self.saveHtml(resp.text, "uncheck_cart_all")
-                
-                logger.info(f"购物车取消勾选响应状态码: {resp.status_code}")
-                
-                # 检查响应状态
-                if resp.status_code == 403:
-                    logger.warning(f"购物车取消勾选请求被拒绝(403)，可能是权限问题或API变更，尝试备用API")
-                    if retry < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                
-                if not self.respStatus(resp):
-                    logger.error(f"购物车取消勾选请求失败: HTTP状态码 {resp.status_code}")
-                    if retry < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    
-                    # 所有尝试都失败，返回一个伪响应
-                    # 与prepareCart函数的处理逻辑兼容，仍创建一个空购物车的有效响应
-                    class FakeResponse:
-                        def __init__(self):
-                            self.status_code = 200
-                            self.text = json.dumps({
-                                "success": True, 
-                                "resultData": {
-                                    "cartInfo": {
-                                        "vendors": []
-                                    }
-                                }
-                            })
-                            
-                        def json(self):
-                            return json.loads(self.text)
-                    
-                    logger.info("返回空购物车的伪响应，允许后续流程继续")
-                    return FakeResponse()
-                
-                # 尝试解析响应JSON
-                try:
-                    resp_json = resp.json()
-                    success = resp_json.get('success', False)
-                    logger.info(f"购物车取消勾选结果: {success}")
-                    
-                    if not success:
-                        error_msg = resp_json.get('message', '未知错误')
-                        logger.warning(f"购物车取消勾选API返回失败: {error_msg}")
-                        
-                        # 即使API返回失败，我们也尝试创建一个有效的响应继续流程
-                        if 'resultData' not in resp_json:
-                            resp_json['resultData'] = {'cartInfo': {'vendors': []}}
-                            
-                        # 修改响应字符串，使其符合后续处理预期
-                        resp.text = json.dumps(resp_json)
-                        
-                    return resp
-                    
-                except Exception as e:
-                    logger.error(f"解析购物车响应出错: {e}")
-                    
-                    # 检查是否有特定的响应格式
-                    if "cart.jd.com" in resp.text and "html" in resp.text.lower():
-                        logger.info("检测到页面响应而非JSON，可能是重定向到购物车页面")
-                        
-                    if retry < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    
-                    # 创建一个符合预期的伪响应
-                    class FakeResponse:
-                        def __init__(self):
-                            self.status_code = 200
-                            self.text = json.dumps({
-                                "success": True, 
-                                "resultData": {
-                                    "cartInfo": {
-                                        "vendors": []
-                                    }
-                                }
-                            })
-                            
-                        def json(self):
-                            return json.loads(self.text)
-                    
-                    logger.info("无法解析购物车响应，返回空购物车的伪响应")
-                    return FakeResponse()
-                    
-            except requests.exceptions.Timeout:
-                logger.error(f"购物车取消勾选请求超时(第{retry+1}次尝试)")
-                if retry < max_retries - 1:
-                    time.sleep(retry_delay)
-                    continue
-                    
-            except Exception as e:
-                logger.error(f"取消勾选购物车时出错: {e}")
-                if retry < max_retries - 1:
-                    time.sleep(retry_delay)
-                    continue
-        
-        # 创建一个伪响应对象，表示失败但允许后续流程继续
-        class FakeResponse:
-            def __init__(self):
-                self.status_code = 200
-                self.text = json.dumps({
+        try:
+            # 根据curl，这是一个POST请求，但所有参数都在URL中，没有请求体
+            resp = self.sess.post(url=url, headers=headers, params=request_params, timeout=15)
+            
+            # 保存响应内容用于调试
+            self.saveHtml(resp.text, "uncheck_cart_all")
+            
+            logger.info(f"购物车取消勾选响应状态码: {resp.status_code}")
+            
+            if not self.respStatus(resp):
+                logger.error(f"购物车取消勾选请求失败: HTTP状态码 {resp.status_code}")
+                # 返回空的响应对象
+                return {
                     "success": True, 
                     "resultData": {
                         "cartInfo": {
                             "vendors": []
                         }
                     }
-                })
+                }
+            
+            # 尝试解析响应JSON
+            try:
+                resp_json = resp.json()
+                success = resp_json.get('success', False)
+                logger.info(f"购物车取消勾选结果: {success}")
                 
-            def json(self):
-                return json.loads(self.text)
-        
-        logger.info("经过多次尝试仍然失败，返回空购物车的伪响应，允许后续流程继续")
-        return FakeResponse()
+                if not success:
+                    error_msg = resp_json.get('message', '未知错误')
+                    logger.warning(f"购物车取消勾选API返回失败: {error_msg}")
+                    
+                    # 确保响应包含预期数据
+                    if 'resultData' not in resp_json:
+                        resp_json['resultData'] = {'cartInfo': {'vendors': []}}
+                
+                return resp_json
+                
+            except Exception as e:
+                logger.error(f"解析购物车响应出错: {e}")
+                # 返回空的响应对象
+                return {
+                    "success": True, 
+                    "resultData": {
+                        "cartInfo": {
+                            "vendors": []
+                        }
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"取消勾选购物车时出错: {e}")
+            # 返回空的响应对象
+            return {
+                "success": True, 
+                "resultData": {
+                    "cartInfo": {
+                        "vendors": []
+                    }
+                }
+            }
 
     def addCartSku(self, skuId, skuNum, areaId):
         """ 加入购入车
@@ -904,7 +853,7 @@ class Session(object):
             'client': 'pc',
             'clientVersion': '1.0.0',
             'body': body_json_string,
-            't': str(int(time.time() * 1000)), # 示例: 时间戳
+            # 't': str(int(time.time() * 1000)), # 示例: 时间戳
             # 'x-api-eid-token': 'YOUR_TOKEN_HERE', # 需要动态获取
             # 'h5st': 'YOUR_H5ST_SIGNATURE_HERE' # 需要动态计算
         }
@@ -1016,30 +965,30 @@ class Session(object):
         """
         logger.info(f"准备购物车: 商品={skuId}, 数量={skuNum}")
         
-        # # 步骤1: 取消勾选所有商品
-        # resp = self.uncheckCartAll()
+        # 步骤1: 取消勾选所有商品
+        resp = self.uncheckCartAll(areaId)
         
-        # # 检查响应状态
-        # try:
-        #     respObj = resp.json()
-        #     logger.info("已获取购物车信息")
-        #     
-        #     # 即使API返回失败，我们也尝试继续
-        #     success = respObj.get('success', False)
-        #     if not success:
-        #         logger.warning('购物车取消勾选返回失败，但尝试继续')
-        #     
-        # except Exception as e:
-        #     logger.error(f'解析购物车信息失败: {e}')
-        #     # 出错时创建默认空购物车的响应对象
-        #     respObj = {
-        #         'success': True,
-        #         'resultData': {'cartInfo': None}
-        #     }
+        # 检查响应状态
+        try:
+            # resp已经是一个字典对象，无需调用json()方法
+            respObj = resp  # 直接使用字典对象，不需要调用json()
+            logger.info(f"已获取购物车信息: {str(respObj)[:100]}...")
+            
+            # 即使API返回失败，我们也尝试继续
+            success = respObj.get('success', False)
+            if not success:
+                logger.warning('购物车取消勾选返回失败，但尝试继续')
+            
+        except Exception as e:
+            logger.error(f'解析购物车信息失败: {e}')
+            # 出错时创建默认空购物车的响应对象
+            respObj = {
+                'success': True,
+                'resultData': {'cartInfo': None}
+            }
         
         # 步骤2: 检查商品是否已在购物车
-        # cart_info = respObj.get('resultData', {}).get('cartInfo')
-        cart_info = False
+        cart_info = respObj.get('resultData', {}).get('cartInfo', {})
         
         # 购物车为空或无法获取，直接添加商品
         if not cart_info:
@@ -1066,7 +1015,7 @@ class Session(object):
                         if not skuUuid:
                             logger.warning("购物车商品缺少skuUuid，尝试删除后重新添加")
                             # 可以考虑先移除再添加
-                            add_result = self.addCartSku(skuId, skuNum)
+                            add_result = self.addCartSku(skuId, skuNum, areaId)
                             return add_result
                             
                         update_result = self.changeCartSkuCount(skuId, skuUuid, skuNum, areaId)
@@ -1077,7 +1026,7 @@ class Session(object):
         
         # 不在购物车中或解析出错，添加商品
         logger.info("商品不在购物车中，添加商品")
-        add_result = self.addCartSku(skuId, skuNum)
+        add_result = self.addCartSku(skuId, skuNum, areaId)
         logger.info(f"添加商品到购物车结果: {add_result}")
         return add_result
 
