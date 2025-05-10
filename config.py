@@ -37,5 +37,27 @@ class Config(object):
         """
         return self._config.has_option(section, option)
 
+    def has_section(self, section):
+        """检查配置文件中是否存在指定的部分
+        
+        Args:
+            section: 配置文件中的节名称
+            
+        Returns:
+            bool: 如果部分存在则返回True，否则返回False
+        """
+        return self._config.has_section(section)
+
+    def items(self, section):
+        """获取指定部分的所有配置项
+        
+        Args:
+            section: 配置文件中的节名称
+            
+        Returns:
+            list: 配置项的列表，每项为(option, value)的元组
+        """
+        return self._config.items(section)
+
 
 global_config = Config()

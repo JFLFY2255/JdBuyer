@@ -48,6 +48,13 @@ class Session(object):
         self.risk_control = ''
         self.track_id = ''
         
+        # 反爬参数
+        self.h5st_params = {}
+        self.t_params = {}
+        
+        # 尝试加载反爬参数
+        self._load_anticrawl_params()
+        
         # 创建调试目录
         self.debug_dir = os.path.join(absPath, 'debug_html')
         if not os.path.exists(self.debug_dir):
@@ -691,23 +698,14 @@ class Session(object):
         user_key = ""
         h5st = ""
         
-        # 尝试从配置中获取值
-        try:
-            from config import global_config
-            # 尝试从配置获取h5st值
-            try:
-                h5st = global_config.get('account', 'h5st', raw=True)
-                logger.info("从配置文件读取到h5st值")
-            except Exception:
-                # 如果配置中没有该项，会抛出异常
-                logger.info("配置文件中未找到h5st值")
-                
-            # 可以尝试从cookie中获取user-key
-            if hasattr(self.sess, 'cookies') and self.sess.cookies.get('user-key'):
-                user_key = self.sess.cookies.get('user-key')
-        except Exception as e:
-            logger.warning(f"从配置读取参数时出错: {e}")
-            logger.info("使用默认值继续")
+        # 从配置的反爬参数中获取
+        function_id = 'pcCart_jc_cartUnCheckAll'
+        t = self.t_params.get(function_id.lower(), str(int(time.time() * 1000)))
+        h5st = self.h5st_params.get(function_id.lower(), "")
+        
+        # 可以尝试从cookie中获取user-key
+        if hasattr(self.sess, 'cookies') and self.sess.cookies.get('user-key'):
+            user_key = self.sess.cookies.get('user-key')
 
         # 构建完整的body
         body = {
@@ -722,17 +720,15 @@ class Session(object):
 
         # 构建请求参数
         request_params = {
-            'functionId': 'pcCart_jc_cartUnCheckAll',
+            'functionId': function_id,
             'appid': 'JDC_mall_cart',  # 根据curl，使用JDC_mall_cart而不是item-v3
             'loginType': 3,
             'client': 'pc',
             'clientVersion': '1.0.0',
             'body': body_json_string,
-            't': 1746876308833,
+            'h5st': h5st,
+            't': t,
         }
-        
-        if h5st:
-            request_params['h5st'] = h5st
 
         logger.info("开始取消勾选购物车中所有商品")
         
@@ -810,6 +806,7 @@ class Session(object):
         retrun 是否成功
         """
         url = 'https://api.m.jd.com/api'
+        function_id = 'pcCart_jc_gate'
 
         headers = {
             'origin': 'https://item.jd.com', # 京东加入购物车接口通常期望 origin 为 item.jd.com 或 cart.jd.com
@@ -841,21 +838,21 @@ class Session(object):
 
         # 2. 将 Python 字典转换为 JSON 字符串
         body_json_string = json.dumps(body_content, separators=(',', ':'))
-        # logger.debug(f"Request body JSON: {body_json_string}")
+        
+        # 从配置的反爬参数中获取
+        t = self.t_params.get(function_id.lower(), str(int(time.time() * 1000)))
+        h5st = self.h5st_params.get(function_id.lower(), "")
 
         # 3. 构建请求的查询参数 (Query Parameters)
-        # 根据curl示例，所有参数都在URL的查询字符串中
-        # 注意：实际请求中，t, x-api-eid-token, h5st 等参数是必需的
         request_params = {
-            'functionId': 'pcCart_jc_gate',
+            'functionId': function_id,
             'appid': 'item-v3',
             'loginType': 3, # 假设已登录
             'client': 'pc',
             'clientVersion': '1.0.0',
             'body': body_json_string,
-            # 't': str(int(time.time() * 1000)), # 示例: 时间戳
-            # 'x-api-eid-token': 'YOUR_TOKEN_HERE', # 需要动态获取
-            # 'h5st': 'YOUR_H5ST_SIGNATURE_HERE' # 需要动态计算
+            'h5st': h5st,
+            't': t
         }
 
         logger.info(f"准备添加商品到购物车: skuId={skuId}, 数量={skuNum}")
@@ -883,46 +880,23 @@ class Session(object):
                 resp_json = resp.json()
                 # 检查 success 字段，有些京东API在顶层直接是 success，有些在 resultData.success
                 success = resp_json.get('success', False)
+                
+                # 检查resultData中的success
                 if not success and 'resultData' in resp_json and isinstance(resp_json['resultData'], dict):
                     success = resp_json['resultData'].get('success', False)
-
+                
                 if success:
                     logger.info(f"成功添加商品 {skuId} 到购物车")
-                    # 检查是否需要勾选商品
-                    try:
-                        # 执行勾选商品操作
-                        check_url = 'https://api.m.jd.com/api'
-                        check_data = {
-                            'functionId': 'pcCart_jc_cartCheckSingle',
-                            'appid': 'JDC_mall_cart',
-                            'body': '{\"operations\":[{\"TheSkus\":[{\"Id\":\"' + skuId + '\",\"checked\":1,\"useUuid\":false}]}]}',
-                            'loginType': 3
-                        }
-                        check_resp = self.sess.post(url=check_url, headers=headers, data=check_data)
-                        logger.info(f"勾选购物车商品响应状态码: {check_resp.status_code}")
-                        if self.respStatus(check_resp):
-                            check_json = check_resp.json()
-                            if check_json.get('success', False):
-                                logger.info(f"成功勾选购物车中的商品 {skuId}")
-                    except Exception as e:
-                        logger.warning(f"勾选购物车商品时出错: {e}")
                 else:
                     message = resp_json.get('message', resp_json.get('errorMessage', '未知错误'))
-                    result_code = resp_json.get('resultCode', '')
-                    logger.error(f"添加商品到购物车API返回失败: Code={result_code}, Msg='{message}', URL: {resp.request.url}, Response: {json.dumps(resp_json, ensure_ascii=False)}")
+                    logger.error(f"添加商品到购物车失败: {message}")
                 
                 return success
-            except json.JSONDecodeError:
-                logger.error(f"解析添加购物车响应JSON出错. 内容: {resp.text[:250]}..., URL: {resp.request.url}")
-                return False
             except Exception as e:
-                logger.error(f"处理添加购物车响应时出错: {e}, URL: {resp.request.url}")
+                logger.error(f"处理添加购物车响应时出错: {e}")
                 return False
-        except requests.exceptions.RequestException as e:
-            logger.error(f"添加商品到购物车请求时发生网络错误: {e}")
-            return False
         except Exception as e:
-            logger.error(f"添加商品到购物车时出错: {e}")
+            logger.error(f"添加商品到购物车过程中出错: {e}")
             return False
 
     def changeCartSkuCount(self, skuId, skuUid, skuNum, areaId):
@@ -932,27 +906,100 @@ class Session(object):
         skuNum 购买数量
         retrun 是否成功
         """
+        logger.info(f"开始修改购物车商品数量: skuId={skuId}, skuUuid={skuUid}, 数量={skuNum}")
+        
         url = 'https://api.m.jd.com/api'
+        function_id = 'pcCart_jc_changeSkuNum'
 
         headers = {
             'User-Agent': self.userAgent,
             'Content-Type': 'application/x-www-form-urlencoded',
             'origin': 'https://cart.jd.com',
-            'referer': 'https://cart.jd.com'
+            'referer': 'https://cart.jd.com/',
+            'x-referer-page': 'https://cart.jd.com/cart_index',
+            'x-rp-client': 'h5_1.0.0'
         }
 
-        body = '{\"operations\":[{\"TheSkus\":[{\"Id\":\"'+skuId+'\",\"num\":'+str(
-            skuNum)+',\"skuUuid\":\"'+skuUid+'\",\"useUuid\":false}]}],\"serInfo\":{\"area\":\"'+areaId+'\"}}'
-        data = {
-            'functionId': 'pcCart_jc_changeSkuNum',
+        # 构建请求体JSON字符串，与curl示例保持一致
+        body_content = {
+            "operations": [{
+                "TheSkus": [{
+                    "Id": skuId,
+                    "num": skuNum,
+                    "skuUuid": skuUid,
+                    "useUuid": False
+                }]
+            }],
+            "serInfo": {
+                "area": areaId
+            }
+        }
+        
+        # 将Python对象转换为JSON字符串，确保格式与原始请求一致
+        body_json_string = json.dumps(body_content, separators=(',', ':'))
+        
+        # 从配置的反爬参数中获取
+        t = self.t_params.get(function_id.lower(), str(int(time.time() * 1000)))
+        h5st = self.h5st_params.get(function_id.lower(), "")
+        
+        # 构建请求参数
+        params = {
+            'functionId': function_id,
             'appid': 'JDC_mall_cart',
-            'body': body,
-            'loginType': 3
+            'loginType': 3,
+            'client': 'pc',
+            'clientVersion': '1.0.0',
+            'body': body_json_string,
+            'h5st': h5st,
+            't': t,
         }
-
-        resp = self.sess.post(url=url, headers=headers, data=data)
-
-        return self.respStatus(resp) and resp.json()['success']
+        
+        try:
+            # 记录请求详情
+            logger.debug(f"修改购物车请求URL: {url}")
+            logger.debug(f"修改购物车请求头: {json.dumps(headers, ensure_ascii=False)}")
+            logger.debug(f"修改购物车请求参数: {json.dumps(params, ensure_ascii=False)}")
+            
+            # 发送请求 - 注意使用params而不是data
+            logger.info("正在发送修改购物车商品数量请求...")
+            resp = self.sess.post(url=url, headers=headers, params=params)
+            
+            # 记录响应状态
+            logger.info(f"修改购物车响应状态码: {resp.status_code}")
+            
+            # 保存响应内容到调试文件
+            self.saveHtml(resp.text, f"change_cart_{skuId}")
+            
+            # 验证响应状态
+            if not self.respStatus(resp):
+                logger.error(f"修改购物车请求失败: HTTP状态码 {resp.status_code}")
+                return False
+                
+            # 解析响应内容
+            try:
+                resp_json = resp.json()
+                success = resp_json.get('success', False)
+                
+                if success:
+                    logger.info(f"成功修改商品 {skuId} 的数量为 {skuNum}")
+                else:
+                    message = resp_json.get('message', resp_json.get('msg', '未知错误'))
+                    logger.error(f"修改购物车商品数量API返回失败: {message}")
+                    
+                # 返回详细结果
+                logger.debug(f"修改购物车响应内容: {json.dumps(resp_json, ensure_ascii=False)}")
+                return success
+                
+            except json.JSONDecodeError:
+                logger.error(f"解析修改购物车响应JSON出错. 内容: {resp.text[:250]}...")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"修改购物车商品数量请求时发生网络错误: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"修改购物车商品数量时出错: {e}")
+            return False
 
     def prepareCart(self, skuId, skuNum, areaId):
         """ 下单前准备购物车
@@ -1010,7 +1057,8 @@ class Session(object):
                         
                     if str(item['item'].get('Id', '')) == skuId:
                         # 在购物车中，修改数量
-                        logger.info(f"商品已在购物车中，修改数量为: {skuNum}")
+                        current_num = item['item'].get('Num', '未知')
+                        logger.info(f"商品已在购物车中，当前数量: {current_num}，将修改为: {skuNum}")
                         skuUuid = item['item'].get('skuUuid', '')
                         if not skuUuid:
                             logger.warning("购物车商品缺少skuUuid，尝试删除后重新添加")
@@ -1083,8 +1131,6 @@ class Session(object):
         :return: 结算信息 dict
         """
         url = 'http://trade.jd.com/shopping/order/getOrderInfo.action'
-        # 备用URL，当主URL失败时使用
-        backup_url = 'https://cart.jd.com/gotoOrder.action'
         
         payload = {
             'rid': str(int(time.time() * 1000)),
@@ -1102,7 +1148,7 @@ class Session(object):
         
         for retry in range(max_retries):
             try:
-                current_url = url if retry == 0 else backup_url
+                current_url = url
                 logger.info(f"开始获取结算页面(第{retry+1}次尝试): {current_url}")
                 
                 # 增加超时时间
@@ -1226,23 +1272,6 @@ class Session(object):
                 
                 logger.info(f"结算信息: 收件人={order_detail['receiver']}, 总价={order_detail['total_price']}, 商品数={len(order_detail['items'])}")
                 
-                # 如果没有获取到关键参数，从页面直接提取
-                if not self.eid or not self.fp or not self.risk_control:
-                    logger.warning("未能从标准位置提取订单提交参数，尝试从整个页面内容中提取")
-                    # 尝试从整个页面的JavaScript中提取
-                    eid_match = re.search(r'"eid"\s*:\s*["\']([^"\']+)["\']', resp.text)
-                    fp_match = re.search(r'"fp"\s*:\s*["\']([^"\']+)["\']', resp.text)
-                    risk_match = re.search(r'"riskControl"\s*:\s*["\']([^"\']+)["\']', resp.text)
-                    
-                    if eid_match and not self.eid:
-                        self.eid = eid_match.group(1)
-                    if fp_match and not self.fp:
-                        self.fp = fp_match.group(1)
-                    if risk_match and not self.risk_control:
-                        self.risk_control = risk_match.group(1)
-                    
-                    logger.info(f"从页面内容提取参数: eid={self.eid}, fp={self.fp}, risk_control={self.risk_control}")
-                
                 return order_detail
                 
             except requests.exceptions.Timeout:
@@ -1306,6 +1335,7 @@ class Session(object):
         :return: True/False 订单提交结果
         """
         url = 'https://trade.jd.com/shopping/order/submitOrder.action'
+        function_id = 'trade_submitOrder'
         # js function of submit order is included in https://trade.jd.com/shopping/misc/js/order.js?r=2018070403091
 
         # 确保必要参数已设置
@@ -1329,7 +1359,6 @@ class Session(object):
             'overseaPurchaseCookies': '',
             'vendorRemarks': '[]',
             'submitOrderParam.sopNotPutInvoice': 'false',
-            'submitOrderParam.trackID': self.track_id if self.track_id else 'TestTrackId',
             'submitOrderParam.ignorePriceChange': '0',
             'submitOrderParam.btSupport': '0',
             'riskControl': self.risk_control,
@@ -1338,29 +1367,22 @@ class Session(object):
             'submitOrderParam.trackId': self.track_id if self.track_id else '',
             'submitOrderParam.eid': self.eid,
             'submitOrderParam.fp': self.fp,
-            'submitOrderParam.needCheck': 1,
-        }
+         }
 
         if isYushou:
             data['submitOrderParam.needCheck'] = 1
             data['preSalePaymentTypeInOptional'] = 2
             data['submitOrderParam.payType4YuShou'] = 2
 
-        # add payment password when necessary
-        paymentPwd = self.password
-        if paymentPwd:
-            data['submitOrderParam.payPassword'] = ''.join(
-                ['u3' + x for x in paymentPwd])
+        # # add payment password when necessary
+        # paymentPwd = self.password
+        # if paymentPwd:
+        #     data['submitOrderParam.payPassword'] = ''.join(
+        #         ['u3' + x for x in paymentPwd])
 
         headers = {
             'User-Agent': self.userAgent,
-            'Host': 'trade.jd.com',
-            'Referer': 'http://trade.jd.com/shopping/order/getOrderInfo.action',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Origin': 'https://trade.jd.com',
-            'Connection': 'keep-alive',
+            'Referer': 'https://trade.jd.com/',
         }
 
         logger.info(f"开始提交订单请求: {url}")
@@ -1369,6 +1391,12 @@ class Session(object):
         # 添加重试机制
         max_retries = 1
         retry_delay = 2  # 秒
+        
+        # 记录请求详情
+        logger.debug("订单提交请求详情:")
+        logger.debug(f"  URL: {url}")
+        logger.debug(f"  Headers: {json.dumps(headers, indent=2)}")
+        logger.debug(f"  Data: {json.dumps(data, indent=2, ensure_ascii=False)}")
         
         for retry in range(max_retries):
             try:
@@ -1581,3 +1609,45 @@ class Session(object):
         # 默认处理其他状态码
         logger.warning(f"未知状态码: {resp.status_code}")
         return False
+
+    def _load_anticrawl_params(self):
+        """从config.ini加载反爬参数（h5st和t）"""
+        try:
+            from config import global_config
+            
+            # 检查anticrawl部分是否存在
+            if not global_config.has_section('anticrawl'):
+                logger.info("配置文件中没有anticrawl部分，跳过加载反爬参数")
+                return
+            
+            # 获取所有anticrawl配置项
+            for key, value in global_config.items('anticrawl'):
+                # 解析h5st参数
+                if key.endswith('_h5st') and value:
+                    # 提取函数ID部分并统一使用小写
+                    func_id = key[:-5].lower()  # 去掉_h5st后缀并转小写
+                    self.h5st_params[func_id] = value
+                    logger.info(f"加载h5st参数: {func_id}，值长度={len(value)}")
+                
+                # 解析t参数
+                elif key.endswith('_t') and value:
+                    func_id = key[:-2].lower()  # 去掉_t后缀并转小写
+                    self.t_params[func_id] = value
+                    logger.info(f"加载t参数: {func_id}，值={value}")
+                else:
+                    logger.debug(f"跳过不符合命名规范的配置项: {key}")
+            
+            # 调试信息：打印已加载的所有参数
+            logger.info(f"共加载了 {len(self.h5st_params)} 个h5st参数和 {len(self.t_params)} 个t参数")
+            if self.h5st_params:
+                logger.debug("已加载的h5st参数:")
+                for func_id, value in self.h5st_params.items():
+                    logger.debug(f"  {func_id}: {value[:30]}...")
+            
+            if self.t_params:
+                logger.debug("已加载的t参数:")
+                for func_id, value in self.t_params.items():
+                    logger.debug(f"  {func_id}: {value}")
+                    
+        except Exception as e:
+            logger.error(f"加载反爬参数时出错: {e}")

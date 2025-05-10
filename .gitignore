@@ -35,6 +35,7 @@ logs/
 # 配置文件（如果不想将配置加入版本控制）
 config.ini
 config.json
+realrequests.txt
 
 # 测试和临时文件
 temp/
